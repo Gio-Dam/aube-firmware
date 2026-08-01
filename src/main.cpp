@@ -10,6 +10,7 @@
 
 String chipId;
 String mqttTopicConfig;
+String mqttClientId;
 
 
 // Configuration du ruban LED
@@ -178,8 +179,8 @@ void maintainConnection() {
       lastReconnectAttempt = now;
       Serial.print("Tentative de connexion MQTT...");
       
-      // Utilisation du chipId comme identifiant client MQTT pour éviter les conflits
-      if (client.connect(chipId.c_str(), mqtt_user, mqtt_password)) {
+      // Utilisation de COMMUNIC8-<CHIP_ID> comme identifiant client MQTT pour éviter les conflits
+      if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
         lastReconnectAttempt = 0; // Réinitialise pour les futurs appels
@@ -201,10 +202,9 @@ void setup() {
   snprintf(chipIdBuffer, sizeof(chipIdBuffer), "%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
   chipId = String(chipIdBuffer);
   
-  // Construction du topic MQTT unique
+  // Construction des identifiants et topics MQTT uniques
+  mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
-  Serial.println("CHIP ID de l'appareil: " + chipId);
-  Serial.println("Topic MQTT d'écoute: " + mqttTopicConfig);
 
   // Initialisation du ruban LED
   strip.begin();
@@ -212,6 +212,14 @@ void setup() {
   strip.show();
   
   setupWiFi();
+
+  Serial.println("\n==========================================");
+  Serial.println("========= INFORMATIONS APPAREIL =========");
+  Serial.println("CHIP ID : " + chipId);
+  Serial.println("MQTT Client ID : " + mqttClientId);
+  Serial.println("MQTT Topic (Config) : " + mqttTopicConfig);
+  Serial.println("==========================================\n");
+  
   setupTime();
   
   client.setServer(mqtt_server, mqtt_port);
