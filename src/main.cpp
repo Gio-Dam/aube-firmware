@@ -37,7 +37,15 @@ int wakeUpHour = 7;
 int wakeUpMinute = 0;
 int sleepHour = 22;
 int sleepMinute = 0;
-int dawnDuration = 30; // en minutes
+int fadeWakeUp = 30; // en minutes
+int fadeSleep = 30; // en minutes
+
+// Variables du mode Live (Télécommande)
+bool isLiveMode = false;
+bool isLampOn = true;
+uint8_t currentR = 255, currentG = 140, currentB = 0;
+uint8_t globalBrightness = 255;
+String currentEffect = "static";
 
 // Configuration MQTT
 const char* mqtt_server = "76.13.43.190";
@@ -116,7 +124,7 @@ void runDawnAnimation() {
   int currentTotalMinutes = currentHour * 60 + currentMinute;
   int wakeUpTotalMinutes = wakeUpHour * 60 + wakeUpMinute;
   
-  int dawnStartMinutes = wakeUpTotalMinutes - dawnDuration;
+  int dawnStartMinutes = wakeUpTotalMinutes - fadeWakeUp;
   if (dawnStartMinutes < 0) {
       dawnStartMinutes += 1440;
   }
@@ -128,7 +136,7 @@ void runDawnAnimation() {
       if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
           int elapsedMinutes = currentTotalMinutes - dawnStartMinutes;
-          progress = (float)(elapsedMinutes * 60 + currentSecond) / (dawnDuration * 60.0f);
+          progress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
       }
   } else {
       if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
@@ -139,7 +147,7 @@ void runDawnAnimation() {
           } else {
               elapsedMinutes = (1440 - dawnStartMinutes) + currentTotalMinutes;
           }
-          progress = (float)(elapsedMinutes * 60 + currentSecond) / (dawnDuration * 60.0f);
+          progress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
       }
   }
 
@@ -171,13 +179,37 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  if (doc["wakeUpHour"].is<int>()) wakeUpHour = doc["wakeUpHour"];
-  if (doc["wakeUpMinute"].is<int>()) wakeUpMinute = doc["wakeUpMinute"];
-  if (doc["sleepHour"].is<int>()) sleepHour = doc["sleepHour"];
-  if (doc["sleepMinute"].is<int>()) sleepMinute = doc["sleepMinute"];
-  if (doc["dawnDuration"].is<int>()) dawnDuration = doc["dawnDuration"];
+  String action = "alarm"; // fallback
+  if (doc["action"].is<String>()) {
+    action = doc["action"].as<String>();
+  }
 
-  Serial.println("Configuration mise à jour via MQTT");
+  if (action == "live") {
+    isLiveMode = true;
+    if (doc["state"].is<String>()) isLampOn = (doc["state"].as<String>() == "ON");
+    if (doc["brightness"].is<int>()) globalBrightness = doc["brightness"];
+    if (doc["effect"].is<String>()) currentEffect = doc["effect"].as<String>();
+    
+    if (doc["color"].is<String>()) {
+      String hexColor = doc["color"].as<String>();
+      if (hexColor.startsWith("#") && hexColor.length() == 7) {
+        long number = strtol(&hexColor[1], NULL, 16);
+        currentR = number >> 16;
+        currentG = number >> 8 & 0xFF;
+        currentB = number & 0xFF;
+      }
+    }
+    Serial.println("Action: LIVE appliquée");
+  } else {
+    isLiveMode = false;
+    if (doc["wakeUpHour"].is<int>()) wakeUpHour = doc["wakeUpHour"];
+    if (doc["wakeUpMinute"].is<int>()) wakeUpMinute = doc["wakeUpMinute"];
+    if (doc["sleepHour"].is<int>()) sleepHour = doc["sleepHour"];
+    if (doc["sleepMinute"].is<int>()) sleepMinute = doc["sleepMinute"];
+    if (doc["fadeWakeUp"].is<int>()) fadeWakeUp = doc["fadeWakeUp"];
+    if (doc["fadeSleep"].is<int>()) fadeSleep = doc["fadeSleep"];
+    Serial.println("Action: ALARM appliquée");
+  }
 }
 
 void maintainMQTTConnection() {
@@ -283,7 +315,7 @@ void connectToWiFi() {
   
   unsigned long startAttemptTime = millis();
   // On remplace le delay bloquant par une boucle non bloquante pour l'animation
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
     pulseOrange();
     delay(20);
   }
@@ -412,10 +444,51 @@ void loop() {
   }
   
   unsigned long now = millis();
-  if (now - lastUpdate > 500) {
+  if (now - lastUpdate > 20) { // 20ms = ~50 FPS pour une fluidité parfaite
     lastUpdate = now;
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
-      runDawnAnimation();
+      if (!isLampOn) {
+        strip.clear();
+        strip.show();
+      } else if (isLiveMode) {
+        strip.setBrightness(globalBrightness);
+        
+        static uint16_t rainbowHue = 0;
+        
+        if (currentEffect == "static") {
+          strip.fill(strip.Color(currentR, currentG, currentB));
+          strip.show();
+        } else if (currentEffect == "pulse") {
+          float val = (sin(millis() / 500.0) + 1.0) / 2.0; 
+          uint8_t r = val * currentR;
+          uint8_t g = val * currentG;
+          uint8_t b = val * currentB;
+          strip.fill(strip.Color(r, g, b));
+          strip.show();
+        } else if (currentEffect == "rainbow") {
+          strip.fill(strip.ColorHSV(rainbowHue, 255, 255));
+          strip.show();
+          rainbowHue += 256;
+        } else if (currentEffect == "fire") {
+          for(int i = 0; i < NUMPIXELS; i++) {
+            int flicker = random(0, 50);
+            int r1 = currentR - flicker;
+            int g1 = currentG - flicker;
+            int b1 = currentB - flicker;
+            if (r1 < 0) r1 = 0;
+            if (g1 < 0) g1 = 0;
+            if (b1 < 0) b1 = 0;
+            strip.setPixelColor(i, strip.Color(r1, g1, b1));
+          }
+          strip.show();
+        } else if (currentEffect == "nightlight") {
+          strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
+          strip.show();
+        }
+      } else {
+        strip.setBrightness(255);
+        runDawnAnimation();
+      }
     }
   }
 }
