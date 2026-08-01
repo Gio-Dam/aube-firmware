@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
+#include <Preferences.h>
+#include <ESPmDNS.h>
+#include <WebServer.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
@@ -12,6 +14,18 @@ String chipId;
 String mqttTopicConfig;
 String mqttClientId;
 
+Preferences preferences;
+bool wifiProvisioned = false;
+String storedSSID = "";
+String storedPass = "";
+
+WebServer server(80);
+bool inAPMode = false;
+
+// Variables pour les tentatives de reconnexion WiFi
+int wifiFailedAttempts = 0;
+const int MAX_WIFI_FAILURES = 6; // 6 tentatives x 5s = 30 secondes avant passage en AP
+unsigned long lastWifiReconnectAttempt = 0;
 
 // Configuration du ruban LED
 #define PIN 16
@@ -33,13 +47,26 @@ const char* mqtt_password = "56nq2fd4ntt2yw9g";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
-unsigned long lastReconnectAttempt = 0;
+unsigned long lastMqttReconnectAttempt = 0;
 
 // Client NTP
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 unsigned long lastUpdate = 0;
+bool isTimeInitialized = false;
+
+// --- GESTION DES LEDS ---
+
+void pulseOrange() {
+  // Oscillation douce entre 0.0 et 1.0 (période de ~3.14s)
+  float val = (sin(millis() / 500.0) + 1.0) / 2.0; 
+  uint8_t r = val * 255;
+  uint8_t g = val * 100; // Un bel orange
+  uint8_t b = 0;
+  strip.fill(strip.Color(r, g, b));
+  strip.show();
+}
 
 uint32_t getColorForProgress(float progress) {
   uint8_t r = 0, g = 0, b = 0;
@@ -60,34 +87,27 @@ uint32_t getColorForProgress(float progress) {
   return strip.Color(r, g, b);
 }
 
-void setupWiFi() {
-  WiFiManager wm;
-  Serial.println("Démarrage de WiFiManager...");
-  
-  // Crée un portail "CommUnic8-Setup" s'il n'y a pas de réseau enregistré
-  if (!wm.autoConnect("CommUnic8-Setup")) {
-    Serial.println("Échec de connexion et timeout atteint");
-    delay(3000);
-    ESP.restart();
-  }
-  
-  Serial.println("\nWiFi connecté.");
-  Serial.println(WiFi.localIP());
-}
+// --- GESTION DU TEMPS ET ANIMATION ---
 
 void setupTime() {
-  // Configuration du fuseau horaire de Paris
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
   tzset();
   timeClient.begin();
+  isTimeInitialized = true;
 }
 
 void updateTime() {
-  timeClient.update();
+  if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
+    timeClient.update();
+  }
 }
 
 void runDawnAnimation() {
+  if (!isTimeInitialized) return;
+
   time_t epochTime = timeClient.getEpochTime();
+  if (epochTime < 100000) return; // Ignore si le temps n'est pas encore synchronisé
+
   struct tm *ptm = localtime(&epochTime);
   int currentHour = ptm->tm_hour;
   int currentMinute = ptm->tm_min;
@@ -104,7 +124,6 @@ void runDawnAnimation() {
   bool isDawnTime = false;
   float progress = 0.0;
   
-  // Détermination si on est dans la période d'aube
   if (dawnStartMinutes <= wakeUpTotalMinutes) {
       if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
@@ -112,7 +131,6 @@ void runDawnAnimation() {
           progress = (float)(elapsedMinutes * 60 + currentSecond) / (dawnDuration * 60.0f);
       }
   } else {
-      // L'aube traverse minuit
       if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
           int elapsedMinutes;
@@ -125,7 +143,6 @@ void runDawnAnimation() {
       }
   }
 
-  // Gestion de l'état des LEDs
   if (isDawnTime) {
       if (progress > 1.0f) progress = 1.0f;
       if (progress < 0.0f) progress = 0.0f;
@@ -134,17 +151,18 @@ void runDawnAnimation() {
       strip.fill(color);
       strip.show();
   } else if (currentHour == sleepHour && currentMinute == sleepMinute) {
-      // A l'heure du coucher, on éteint
       strip.clear();
       strip.show();
   }
 }
 
+// --- MQTT ---
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrivé sur le topic: ");
   Serial.println(topic);
 
-  JsonDocument doc; // Compatible avec ArduinoJson 7
+  JsonDocument doc; 
   DeserializationError error = deserializeJson(doc, payload, length);
 
   if (error) {
@@ -153,37 +171,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  if (doc.containsKey("wakeUpHour")) wakeUpHour = doc["wakeUpHour"];
-  if (doc.containsKey("wakeUpMinute")) wakeUpMinute = doc["wakeUpMinute"];
-  if (doc.containsKey("sleepHour")) sleepHour = doc["sleepHour"];
-  if (doc.containsKey("sleepMinute")) sleepMinute = doc["sleepMinute"];
-  if (doc.containsKey("dawnDuration")) dawnDuration = doc["dawnDuration"];
+  if (doc["wakeUpHour"].is<int>()) wakeUpHour = doc["wakeUpHour"];
+  if (doc["wakeUpMinute"].is<int>()) wakeUpMinute = doc["wakeUpMinute"];
+  if (doc["sleepHour"].is<int>()) sleepHour = doc["sleepHour"];
+  if (doc["sleepMinute"].is<int>()) sleepMinute = doc["sleepMinute"];
+  if (doc["dawnDuration"].is<int>()) dawnDuration = doc["dawnDuration"];
 
   Serial.println("Configuration mise à jour via MQTT");
 }
 
-void maintainConnection() {
-  if (WiFi.status() != WL_CONNECTED) {
-    unsigned long now = millis();
-    if (now - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = now;
-      Serial.println("Perte du WiFi, en attente de reconnexion automatique...");
-      WiFi.reconnect();
-    }
-    return; // On ne peut pas connecter MQTT sans WiFi
-  }
-
+void maintainMQTTConnection() {
   if (!client.connected()) {
     unsigned long now = millis();
-    if (now - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = now;
+    if (now - lastMqttReconnectAttempt > 5000) {
+      lastMqttReconnectAttempt = now;
       Serial.print("Tentative de connexion MQTT...");
       
-      // Utilisation de COMMUNIC8-<CHIP_ID> comme identifiant client MQTT pour éviter les conflits
       if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
-        lastReconnectAttempt = 0; // Réinitialise pour les futurs appels
+        lastMqttReconnectAttempt = 0;
       } else {
         Serial.print("échec, rc=");
         Serial.print(client.state());
@@ -193,26 +200,129 @@ void maintainConnection() {
   }
 }
 
+// --- GESTION DU WI-FI ---
+
+void startAPMode() {
+  Serial.println("Démarrage du point d'accès Wi-Fi (AP)...");
+  
+  WiFi.mode(WIFI_AP);
+  String apName = "CommUnic8-Setup";
+  
+  // Définit l'IP de l'AP sur 192.168.4.1 (comportement par défaut, mais explicite)
+  IPAddress apIP(192, 168, 4, 1);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(apName.c_str());
+  
+  Serial.print("IP du point d'accès : ");
+  Serial.println(WiFi.softAPIP());
+
+  // Lancement du mDNS pour http://setup.local
+  if (!MDNS.begin("setup")) {
+    Serial.println("Erreur au démarrage du mDNS");
+  } else {
+    Serial.println("mDNS démarré. Accessible via http://setup.local");
+  }
+
+  // Configuration du WebServer
+  server.on("/", HTTP_GET, []() {
+    String html = R"HTML(
+      <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; text-align: center; margin: 0; padding: 20px; background: #0f172a; color: white; }
+        .container { max-width: 400px; margin: 0 auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        h2 { margin-bottom: 20px; color: #38bdf8; }
+        input { padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; }
+        input[type="submit"] { background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 16px; border: none; cursor: pointer; margin-top: 20px; transition: background 0.3s; }
+        input[type="submit"]:hover { background: #0ea5e9; }
+      </style>
+      </head><body>
+      <div class="container">
+        <h2>CommUnic8<br>Configuration</h2>
+        <p style="font-size: 14px; color: #94a3b8; margin-bottom: 20px;">Veuillez entrer les identifiants de votre réseau Wi-Fi.</p>
+        <form action="/save" method="POST">
+          <input type="text" name="ssid" placeholder="Nom du réseau (SSID)" required>
+          <input type="password" name="pass" placeholder="Mot de passe" required>
+          <input type="submit" value="Se connecter">
+        </form>
+      </div>
+      </body></html>
+    )HTML";
+    server.send(200, "text/html", html);
+  });
+
+  server.on("/save", HTTP_POST, []() {
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+    
+    preferences.begin("wifi", false);
+    preferences.putString("ssid", ssid);
+    preferences.putString("pass", pass);
+    preferences.end();
+    
+    String html = R"HTML(
+      <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background: #0f172a; color: #38bdf8; }</style>
+      </head><body><h2>Sauvegarde réussie !</h2><p style="color:white;">La lampe va redémarrer et tenter de se connecter à : <b>)HTML" + ssid + R"HTML(</b></p></body></html>
+    )HTML";
+    
+    server.send(200, "text/html", html);
+    delay(2000);
+    ESP.restart();
+  });
+
+  server.begin();
+  inAPMode = true;
+}
+
+void connectToWiFi() {
+  Serial.print("Connexion au Wi-Fi : ");
+  Serial.println(storedSSID);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(storedSSID.c_str(), storedPass.c_str());
+  
+  unsigned long startAttemptTime = millis();
+  // On remplace le delay bloquant par une boucle non bloquante pour l'animation
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
+    pulseOrange();
+    delay(20);
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connecté.");
+    Serial.println(WiFi.localIP());
+    wifiProvisioned = true;
+    wifiFailedAttempts = 0;
+    strip.clear();
+    strip.show();
+    if (!isTimeInitialized) {
+      setupTime();
+    }
+  } else {
+    Serial.println("\nÉchec de la connexion Wi-Fi.");
+    wifiProvisioned = false;
+    strip.clear();
+    strip.show();
+  }
+}
+
+// --- SETUP & LOOP ---
+
 void setup() {
   Serial.begin(115200);
   
-  // Récupération de l'identifiant unique de la puce (adresse MAC)
   uint64_t mac = ESP.getEfuseMac();
   char chipIdBuffer[18];
   snprintf(chipIdBuffer, sizeof(chipIdBuffer), "%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
   chipId = String(chipIdBuffer);
   
-  // Construction des identifiants et topics MQTT uniques
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
 
-  // Initialisation du ruban LED
   strip.begin();
   strip.clear();
   strip.show();
   
-  setupWiFi();
-
   Serial.println("\n==========================================");
   Serial.println("========= INFORMATIONS APPAREIL =========");
   Serial.println("CHIP ID : " + chipId);
@@ -220,24 +330,92 @@ void setup() {
   Serial.println("MQTT Topic (Config) : " + mqttTopicConfig);
   Serial.println("==========================================\n");
   
-  setupTime();
-  
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(mqttCallback);
+
+  preferences.begin("wifi", false);
+  storedSSID = preferences.getString("ssid", "");
+  storedPass = preferences.getString("pass", "");
+  preferences.end();
+  
+  if (storedSSID.length() > 0) {
+    connectToWiFi();
+    if (!wifiProvisioned) {
+      startAPMode();
+    }
+  } else {
+    startAPMode();
+  }
 }
 
 void loop() {
+  if (inAPMode) {
+    server.handleClient();
+    
+    // Clignotement bleu franc sur toutes les LEDs en mode AP
+    unsigned long now = millis();
+    if (now - lastUpdate > 500) {
+      lastUpdate = now;
+      static bool ledState = false;
+      if (ledState) {
+        strip.fill(strip.Color(0, 0, 255));
+      } else {
+        strip.clear();
+      }
+      strip.show();
+      ledState = !ledState;
+    }
+    return;
+  }
+
+  // Vérification de la connexion Wi-Fi
+  if (wifiProvisioned && WiFi.status() != WL_CONNECTED) {
+    pulseOrange(); // Pulsation douce pendant la recherche de réseau
+    
+    unsigned long now = millis();
+    if (now - lastWifiReconnectAttempt > 5000) {
+      lastWifiReconnectAttempt = now;
+      wifiFailedAttempts++;
+      Serial.print("Perte du WiFi, tentative de reconnexion ");
+      Serial.print(wifiFailedAttempts);
+      Serial.print("/");
+      Serial.println(MAX_WIFI_FAILURES);
+      
+      if (wifiFailedAttempts >= MAX_WIFI_FAILURES) {
+        Serial.println("Échec définitif. Passage en mode Point d'Accès.");
+        wifiProvisioned = false;
+        WiFi.disconnect();
+        strip.clear();
+        strip.show();
+        startAPMode();
+      } else {
+        WiFi.disconnect();
+        WiFi.reconnect();
+      }
+    }
+    return; // Empêche l'exécution MQTT et horloge pendant la coupure Wi-Fi
+  }
+
+  // Retour de la connexion
+  if (wifiProvisioned && wifiFailedAttempts > 0 && WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi reconnecté avec succès !");
+    wifiFailedAttempts = 0;
+    strip.clear();
+    strip.show();
+  }
+
   updateTime();
-  maintainConnection();
+  maintainMQTTConnection();
   
-  if (client.connected()) {
+  if (wifiProvisioned && client.connected()) {
     client.loop();
   }
   
   unsigned long now = millis();
-  // Mise à jour non-bloquante toutes les 500ms
   if (now - lastUpdate > 500) {
     lastUpdate = now;
-    runDawnAnimation();
+    if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
+      runDawnAnimation();
+    }
   }
 }
