@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
@@ -7,9 +8,9 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
-// Variables globales Wi-Fi à remplir par l'utilisateur
-const char* ssid = "SFR_0F08";
-const char* password = "4btk45txpg2ibu79kkxv";
+String chipId;
+String mqttTopicConfig;
+
 
 // Configuration du ruban LED
 #define PIN 16
@@ -59,19 +60,18 @@ uint32_t getColorForProgress(float progress) {
 }
 
 void setupWiFi() {
-  if (String(ssid) != "") {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
-    Serial.print("Connexion au WiFi");
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
-    }
-    Serial.println("\nWiFi connecté.");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("SSID non configuré. Mode hors ligne.");
+  WiFiManager wm;
+  Serial.println("Démarrage de WiFiManager...");
+  
+  // Crée un portail "CommUnic8-Setup" s'il n'y a pas de réseau enregistré
+  if (!wm.autoConnect("CommUnic8-Setup")) {
+    Serial.println("Échec de connexion et timeout atteint");
+    delay(3000);
+    ESP.restart();
   }
+  
+  Serial.println("\nWiFi connecté.");
+  Serial.println(WiFi.localIP());
 }
 
 void setupTime() {
@@ -166,9 +166,8 @@ void maintainConnection() {
     unsigned long now = millis();
     if (now - lastReconnectAttempt > 5000) {
       lastReconnectAttempt = now;
-      Serial.println("Perte du WiFi, tentative de reconnexion...");
-      WiFi.disconnect();
-      WiFi.begin(ssid, password);
+      Serial.println("Perte du WiFi, en attente de reconnexion automatique...");
+      WiFi.reconnect();
     }
     return; // On ne peut pas connecter MQTT sans WiFi
   }
@@ -178,12 +177,11 @@ void maintainConnection() {
     if (now - lastReconnectAttempt > 5000) {
       lastReconnectAttempt = now;
       Serial.print("Tentative de connexion MQTT...");
-      String clientId = "ESP32Client-";
-      clientId += String(random(0xffff), HEX);
       
-      if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
+      // Utilisation du chipId comme identifiant client MQTT pour éviter les conflits
+      if (client.connect(chipId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println("connecté");
-        client.subscribe("communic8/lampe/config");
+        client.subscribe(mqttTopicConfig.c_str());
         lastReconnectAttempt = 0; // Réinitialise pour les futurs appels
       } else {
         Serial.print("échec, rc=");
@@ -197,6 +195,17 @@ void maintainConnection() {
 void setup() {
   Serial.begin(115200);
   
+  // Récupération de l'identifiant unique de la puce (adresse MAC)
+  uint64_t mac = ESP.getEfuseMac();
+  char chipIdBuffer[18];
+  snprintf(chipIdBuffer, sizeof(chipIdBuffer), "%04X%08X", (uint16_t)(mac >> 32), (uint32_t)mac);
+  chipId = String(chipIdBuffer);
+  
+  // Construction du topic MQTT unique
+  mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
+  Serial.println("CHIP ID de l'appareil: " + chipId);
+  Serial.println("Topic MQTT d'écoute: " + mqttTopicConfig);
+
   // Initialisation du ruban LED
   strip.begin();
   strip.clear();
