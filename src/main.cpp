@@ -29,8 +29,8 @@ unsigned long lastWifiReconnectAttempt = 0;
 
 // Configuration du ruban LED
 #define PIN 16
-#define NUMPIXELS 30
-Adafruit_NeoPixel strip(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+uint16_t numLeds = 30;
+Adafruit_NeoPixel strip(numLeds, PIN, NEO_GRB + NEO_KHZ800);
 
 // Variables de configuration de l'aube/coucher
 int wakeUpHour = 7;
@@ -39,6 +39,13 @@ int sleepHour = 22;
 int sleepMinute = 0;
 int fadeWakeUp = 30; // en minutes
 int fadeSleep = 30; // en minutes
+
+// Couleurs personnalisées
+bool useDefaultColors = true;
+uint32_t wakeUpColors[10] = {0x000000, 0xFF0000, 0xFF8000, 0xFFFFFF};
+int numWakeUpColors = 4;
+uint32_t sleepColors[10] = {0xFFFFFF, 0xFF8000, 0xFF0000, 0x000000};
+int numSleepColors = 4;
 
 // Variables du mode Live (Télécommande)
 bool isLiveMode = false;
@@ -76,22 +83,28 @@ void pulseOrange() {
   strip.show();
 }
 
-uint32_t getColorForProgress(float progress) {
-  uint8_t r = 0, g = 0, b = 0;
-  
-  if (progress <= 0.333f) {
-    float p = progress / 0.333f;
-    r = p * 255;
-  } else if (progress <= 0.666f) {
-    float p = (progress - 0.333f) / 0.333f;
-    r = 255;
-    g = p * 128;
-  } else {
-    float p = (progress - 0.666f) / 0.334f;
-    r = 255;
-    g = 128 + p * 127;
-    b = p * 255; // Ajout du bleu pour finir sur un blanc complet (255, 255, 255)
-  }
+uint32_t getColorForProgress(float progress, uint32_t* colors, int count) {
+  if (count == 0) return strip.Color(0, 0, 0);
+  if (count == 1) return colors[0];
+  if (progress <= 0.0f) return colors[0];
+  if (progress >= 1.0f) return colors[count - 1];
+
+  float scaled = progress * (count - 1);
+  int index = (int)scaled;
+  float fraction = scaled - index;
+
+  uint8_t r1 = (colors[index] >> 16) & 0xFF;
+  uint8_t g1 = (colors[index] >> 8) & 0xFF;
+  uint8_t b1 = colors[index] & 0xFF;
+
+  uint8_t r2 = (colors[index + 1] >> 16) & 0xFF;
+  uint8_t g2 = (colors[index + 1] >> 8) & 0xFF;
+  uint8_t b2 = colors[index + 1] & 0xFF;
+
+  uint8_t r = r1 + (r2 - r1) * fraction;
+  uint8_t g = g1 + (g2 - g1) * fraction;
+  uint8_t b = b1 + (b2 - b1) * fraction;
+
   return strip.Color(r, g, b);
 }
 
@@ -110,57 +123,99 @@ void updateTime() {
   }
 }
 
-void runDawnAnimation() {
+void runCircadianAnimations() {
   if (!isTimeInitialized) return;
 
   time_t epochTime = timeClient.getEpochTime();
   if (epochTime < 100000) return; // Ignore si le temps n'est pas encore synchronisé
 
   struct tm *ptm = localtime(&epochTime);
-  int currentHour = ptm->tm_hour;
-  int currentMinute = ptm->tm_min;
+  int currentTotalMinutes = ptm->tm_hour * 60 + ptm->tm_min;
   int currentSecond = ptm->tm_sec;
   
-  int currentTotalMinutes = currentHour * 60 + currentMinute;
   int wakeUpTotalMinutes = wakeUpHour * 60 + wakeUpMinute;
+  int sleepTotalMinutes = sleepHour * 60 + sleepMinute;
   
+  // Dawn calculations
   int dawnStartMinutes = wakeUpTotalMinutes - fadeWakeUp;
-  if (dawnStartMinutes < 0) {
-      dawnStartMinutes += 1440;
-  }
+  if (dawnStartMinutes < 0) dawnStartMinutes += 1440;
 
   bool isDawnTime = false;
-  float progress = 0.0;
+  float dawnProgress = 0.0;
   
   if (dawnStartMinutes <= wakeUpTotalMinutes) {
       if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
-          int elapsedMinutes = currentTotalMinutes - dawnStartMinutes;
-          progress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
+          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecond) / (fadeWakeUp * 60.0f);
       }
   } else {
       if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
-          int elapsedMinutes;
-          if (currentTotalMinutes >= dawnStartMinutes) {
-              elapsedMinutes = currentTotalMinutes - dawnStartMinutes;
-          } else {
-              elapsedMinutes = (1440 - dawnStartMinutes) + currentTotalMinutes;
-          }
-          progress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
+          int elapsedMinutes = (currentTotalMinutes >= dawnStartMinutes) ? (currentTotalMinutes - dawnStartMinutes) : ((1440 - dawnStartMinutes) + currentTotalMinutes);
+          dawnProgress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
       }
   }
 
-  if (isDawnTime) {
-      if (progress > 1.0f) progress = 1.0f;
-      if (progress < 0.0f) progress = 0.0f;
-      
-      uint32_t color = getColorForProgress(progress);
-      strip.fill(color);
-      strip.show();
-  } else if (currentHour == sleepHour && currentMinute == sleepMinute) {
-      strip.clear();
-      strip.show();
+  // Sleep calculations
+  int sleepEndMinutes = sleepTotalMinutes + fadeSleep;
+  if (sleepEndMinutes >= 1440) sleepEndMinutes -= 1440;
+
+  bool isSleepTime = false;
+  float sleepProgress = 0.0;
+
+  if (sleepTotalMinutes <= sleepEndMinutes) {
+      if (currentTotalMinutes >= sleepTotalMinutes && currentTotalMinutes < sleepEndMinutes) {
+          isSleepTime = true;
+          sleepProgress = (float)((currentTotalMinutes - sleepTotalMinutes) * 60 + currentSecond) / (fadeSleep * 60.0f);
+      }
+  } else {
+      if (currentTotalMinutes >= sleepTotalMinutes || currentTotalMinutes < sleepEndMinutes) {
+          isSleepTime = true;
+          int elapsedMinutes = (currentTotalMinutes >= sleepTotalMinutes) ? (currentTotalMinutes - sleepTotalMinutes) : ((1440 - sleepTotalMinutes) + currentTotalMinutes);
+          sleepProgress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeSleep * 60.0f);
+      }
+  }
+
+  // Tracking state changes to trigger mode switch
+  static bool wasDawnTime = false;
+  static bool wasSleepTime = false;
+
+  // Si on entre dans une période de planification, on force le mode alarme et on allume la lampe
+  // Cela permet de réveiller la lampe même si elle a été éteinte via la télécommande
+  if (isDawnTime && !wasDawnTime) {
+      isLiveMode = false;
+      isLampOn = true;
+  }
+  if (isSleepTime && !wasSleepTime) {
+      isLiveMode = false;
+      isLampOn = true;
+  }
+  
+  // A la fin exacte du coucher de soleil, on éteint la lampe automatiquement
+  if (!isSleepTime && wasSleepTime && currentTotalMinutes == sleepEndMinutes) {
+      isLampOn = false;
+  }
+
+  wasDawnTime = isDawnTime;
+  wasSleepTime = isSleepTime;
+
+  // Mise à jour visuelle si on est en mode planification et que la lampe est allumée
+  if (isLampOn && !isLiveMode) {
+      if (isDawnTime) {
+          if (dawnProgress > 1.0f) dawnProgress = 1.0f;
+          if (dawnProgress < 0.0f) dawnProgress = 0.0f;
+          uint32_t color = getColorForProgress(dawnProgress, wakeUpColors, numWakeUpColors);
+          strip.setBrightness(255);
+          strip.fill(color);
+          strip.show();
+      } else if (isSleepTime) {
+          if (sleepProgress > 1.0f) sleepProgress = 1.0f;
+          if (sleepProgress < 0.0f) sleepProgress = 0.0f;
+          uint32_t color = getColorForProgress(sleepProgress, sleepColors, numSleepColors);
+          strip.setBrightness(255);
+          strip.fill(color);
+          strip.show();
+      }
   }
 }
 
@@ -182,6 +237,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String action = "alarm"; // fallback
   if (doc["action"].is<String>()) {
     action = doc["action"].as<String>();
+  }
+
+  if (doc["numLeds"].is<uint16_t>()) {
+    uint16_t newNumLeds = doc["numLeds"];
+    if (newNumLeds != numLeds && newNumLeds > 0) {
+      numLeds = newNumLeds;
+      preferences.begin("config", false);
+      preferences.putUShort("numLeds", numLeds);
+      preferences.end();
+      strip.updateLength(numLeds);
+      Serial.print("Nombre de LEDs mis à jour: ");
+      Serial.println(numLeds);
+    }
   }
 
   if (action == "live") {
@@ -208,6 +276,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (doc["sleepMinute"].is<int>()) sleepMinute = doc["sleepMinute"];
     if (doc["fadeWakeUp"].is<int>()) fadeWakeUp = doc["fadeWakeUp"];
     if (doc["fadeSleep"].is<int>()) fadeSleep = doc["fadeSleep"];
+    
+    if (doc["useDefaultColors"].is<bool>()) useDefaultColors = doc["useDefaultColors"];
+    
+    if (doc["wakeUpColors"].is<JsonArray>()) {
+      JsonArray arr = doc["wakeUpColors"].as<JsonArray>();
+      numWakeUpColors = 0;
+      for (JsonVariant v : arr) {
+        if (numWakeUpColors < 10) {
+          String hex = v.as<String>();
+          if (hex.startsWith("#")) wakeUpColors[numWakeUpColors++] = strtol(&hex[1], NULL, 16);
+        }
+      }
+    }
+    
+    if (doc["sleepColors"].is<JsonArray>()) {
+      JsonArray arr = doc["sleepColors"].as<JsonArray>();
+      numSleepColors = 0;
+      for (JsonVariant v : arr) {
+        if (numSleepColors < 10) {
+          String hex = v.as<String>();
+          if (hex.startsWith("#")) sleepColors[numSleepColors++] = strtol(&hex[1], NULL, 16);
+        }
+      }
+    }
+    
+    if (useDefaultColors) {
+      numWakeUpColors = 4;
+      wakeUpColors[0] = 0x000000; wakeUpColors[1] = 0xFF0000; wakeUpColors[2] = 0xFF8000; wakeUpColors[3] = 0xFFFFFF;
+      numSleepColors = 4;
+      sleepColors[0] = 0xFFFFFF; sleepColors[1] = 0xFF8000; sleepColors[2] = 0xFF0000; sleepColors[3] = 0x000000;
+    }
+    
     Serial.println("Action: ALARM appliquée");
   }
 }
@@ -351,6 +451,12 @@ void setup() {
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
 
+  // Initialisation du nombre de LEDs depuis la mémoire
+  preferences.begin("config", false);
+  numLeds = preferences.getUShort("numLeds", 30);
+  preferences.end();
+  strip.updateLength(numLeds);
+
   strip.begin();
   strip.clear();
   strip.show();
@@ -360,6 +466,10 @@ void setup() {
   Serial.println("CHIP ID : " + chipId);
   Serial.println("MQTT Client ID : " + mqttClientId);
   Serial.println("MQTT Topic (Config) : " + mqttTopicConfig);
+  Serial.println("==========================================");
+  Serial.println(">>> LIEN D'ASSOCIATION (QR CODE) <<<");
+  Serial.println("https://app.aube.studio/claim?deviceId=" + chipId);
+  Serial.println("Ou utilisez l'identifiant manuel : " + chipId);
   Serial.println("==========================================\n");
   
   client.setServer(mqtt_server, mqtt_port);
@@ -447,6 +557,9 @@ void loop() {
   if (now - lastUpdate > 20) { // 20ms = ~50 FPS pour une fluidité parfaite
     lastUpdate = now;
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
+      // Evaluation permanente de la planification (aube/coucher)
+      runCircadianAnimations();
+      
       if (!isLampOn) {
         strip.clear();
         strip.show();
@@ -470,7 +583,7 @@ void loop() {
           strip.show();
           rainbowHue += 256;
         } else if (currentEffect == "fire") {
-          for(int i = 0; i < NUMPIXELS; i++) {
+          for(int i = 0; i < numLeds; i++) {
             int flicker = random(0, 50);
             int r1 = currentR - flicker;
             int g1 = currentG - flicker;
@@ -485,9 +598,6 @@ void loop() {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
           strip.show();
         }
-      } else {
-        strip.setBrightness(255);
-        runDawnAnimation();
       }
     }
   }
