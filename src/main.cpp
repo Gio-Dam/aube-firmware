@@ -206,6 +206,78 @@ void updateTime() {
 }
 
 
+void checkSchedules() {
+  if (!isTimeInitialized) return;
+
+  time_t epochTime = timeClient.getEpochTime();
+  if (epochTime < 100000) return;
+
+  struct tm *ptm = localtime(&epochTime);
+  int currentTotalMinutes = ptm->tm_hour * 60 + ptm->tm_min;
+  
+  static int lastTriggeredMinute = -1;
+  if (lastTriggeredMinute == currentTotalMinutes) return; // Déjà vérifié pour cette minute
+
+  // Vérification de la date et du jour pour les exceptions
+  char dateStr[11];
+  snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
+  
+  bool isException = false;
+  for (int i = 0; i < numExceptions; i++) {
+    if (exceptions[i] == String(dateStr)) {
+      isException = true;
+      break;
+    }
+  }
+
+  if (isException) {
+    lastTriggeredMinute = currentTotalMinutes;
+    return;
+  }
+
+  DayConfig todayConfig = weeklySchedules[ptm->tm_wday];
+  if (!todayConfig.isActive) {
+    lastTriggeredMinute = currentTotalMinutes;
+    return;
+  }
+
+  // Calcul du début de l'aube
+  int dawnStartMinutes = (todayConfig.wakeUpHour * 60 + todayConfig.wakeUpMinute) - todayConfig.fadeWakeUp;
+  if (dawnStartMinutes < 0) dawnStartMinutes += 1440;
+
+  // Calcul du début du crépuscule
+  int sleepStartMinutes = (todayConfig.sleepHour * 60 + todayConfig.sleepMinute) - todayConfig.fadeSleep;
+  if (sleepStartMinutes < 0) sleepStartMinutes += 1440;
+
+  if (currentTotalMinutes == dawnStartMinutes) {
+    currentEffect = "sunrise";
+    sunriseDurationMillis = (unsigned long)todayConfig.fadeWakeUp * 60000UL;
+    sunriseStartTime = millis();
+    isLiveMode = true;
+    isLampOn = true;
+    publishState();
+    Serial.println("⏰ Déclenchement de l'aube locale !");
+  } else if (currentTotalMinutes == sleepStartMinutes) {
+    currentEffect = "sunset";
+    sunsetDurationMillis = (unsigned long)todayConfig.fadeSleep * 60000UL;
+    sunsetStartTime = millis();
+    isLiveMode = true;
+    isLampOn = true;
+    publishState();
+    Serial.println("⏰ Déclenchement du crépuscule local !");
+  } else {
+    // Extinction totale à l'heure exacte du coucher
+    int sleepTotalMinutes = todayConfig.sleepHour * 60 + todayConfig.sleepMinute;
+    if (currentTotalMinutes == sleepTotalMinutes && isLampOn) {
+        isLampOn = false;
+        publishState();
+        Serial.println("⏰ Extinction automatique (fin du crépuscule) !");
+    }
+  }
+
+  lastTriggeredMinute = currentTotalMinutes;
+}
+
 // --- MQTT ---
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -660,7 +732,7 @@ void loop() {
   if (now - lastUpdate > 20) { // 20ms = ~50 FPS pour une fluidité parfaite
     lastUpdate = now;
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
-      // Planification (aube/coucher) désactivée car maintenant pilotée par le cloud
+      checkSchedules();
       
       // Gestion du timer
       if (isLiveMode && isTimerActive && isLampOn) {
