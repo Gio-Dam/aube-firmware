@@ -12,6 +12,7 @@
 
 String chipId;
 String mqttTopicConfig;
+String mqttTopicState;
 String mqttClientId;
 
 Preferences preferences;
@@ -33,14 +34,17 @@ uint16_t numLeds = 30;
 Adafruit_NeoPixel strip(numLeds, PIN, NEO_GRB + NEO_KHZ800);
 
 // Variables de configuration de l'aube/coucher
-int wakeUpHour = 7;
-int wakeUpMinute = 0;
-int sleepHour = 22;
-int sleepMinute = 0;
-int fadeWakeUp = 30; // en minutes
-int fadeSleep = 30; // en minutes
+struct DayConfig {
+  bool isActive;
+  uint8_t wakeUpHour;
+  uint8_t wakeUpMinute;
+  uint8_t sleepHour;
+  uint8_t sleepMinute;
+  uint8_t fadeWakeUp;
+  uint8_t fadeSleep;
+};
 
-bool activeDays[7] = {true, true, true, true, true, true, true};
+DayConfig weeklySchedules[7];
 String exceptions[10];
 int numExceptions = 0;
 
@@ -62,6 +66,11 @@ bool useDefaultEffectColors = true;
 uint32_t effectColors[10] = {0};
 int numEffectColors = 0;
 
+// Variables pour le Timer Live
+unsigned long liveTimerStart = 0;
+unsigned long activeTimerDuration = 0;
+bool isTimerActive = false;
+
 // Variables d'état pour les transitions
 bool wasDawnTime = false;
 bool wasSleepTime = false;
@@ -82,6 +91,37 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 unsigned long lastUpdate = 0;
 bool isTimeInitialized = false;
+
+// --- GESTION DES ETATS ---
+
+void publishState() {
+  if (!client.connected()) return;
+  
+  JsonDocument doc;
+  doc["state"] = isLampOn ? "ON" : "OFF";
+  doc["brightness"] = globalBrightness;
+  
+  char hexColor[8];
+  snprintf(hexColor, sizeof(hexColor), "#%02x%02x%02x", currentR, currentG, currentB);
+  doc["color"] = String(hexColor);
+  
+  doc["effect"] = currentEffect;
+  
+  if (isTimerActive) {
+    long remainingMillis = activeTimerDuration - (millis() - liveTimerStart);
+    doc["timer"] = remainingMillis > 0 ? (remainingMillis / 60000) + 1 : 0;
+  } else {
+    doc["timer"] = 0;
+  }
+
+  String output;
+  serializeJson(doc, output);
+  
+  // Publie avec retain=true pour que l'app web lise le dernier état immédiatement
+  client.publish(mqttTopicState.c_str(), output.c_str(), true);
+  Serial.print("Etat publié: ");
+  Serial.println(output);
+}
 
 // --- GESTION DES LEDS ---
 
@@ -188,13 +228,14 @@ void runCircadianAnimations() {
     }
   }
 
-  bool isTodayActive = activeDays[ptm->tm_wday] && !isException;
+  DayConfig todayConfig = weeklySchedules[ptm->tm_wday];
+  bool isTodayActive = todayConfig.isActive && !isException;
   
-  int wakeUpTotalMinutes = wakeUpHour * 60 + wakeUpMinute;
-  int sleepTotalMinutes = sleepHour * 60 + sleepMinute;
+  int wakeUpTotalMinutes = todayConfig.wakeUpHour * 60 + todayConfig.wakeUpMinute;
+  int sleepTotalMinutes = todayConfig.sleepHour * 60 + todayConfig.sleepMinute;
   
   // Dawn calculations
-  int dawnStartMinutes = wakeUpTotalMinutes - fadeWakeUp;
+  int dawnStartMinutes = wakeUpTotalMinutes - todayConfig.fadeWakeUp;
   if (dawnStartMinutes < 0) dawnStartMinutes += 1440;
 
   bool isDawnTime = false;
@@ -203,18 +244,18 @@ void runCircadianAnimations() {
   if (dawnStartMinutes <= wakeUpTotalMinutes) {
       if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
-          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecondsFloat) / (fadeWakeUp * 60.0f);
+          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecondsFloat) / (todayConfig.fadeWakeUp * 60.0f);
       }
   } else {
       if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
           int elapsedMinutes = (currentTotalMinutes >= dawnStartMinutes) ? (currentTotalMinutes - dawnStartMinutes) : ((1440 - dawnStartMinutes) + currentTotalMinutes);
-          dawnProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (fadeWakeUp * 60.0f);
+          dawnProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (todayConfig.fadeWakeUp * 60.0f);
       }
   }
 
   // Sleep calculations
-  int sleepStartMinutes = sleepTotalMinutes - fadeSleep;
+  int sleepStartMinutes = sleepTotalMinutes - todayConfig.fadeSleep;
   if (sleepStartMinutes < 0) sleepStartMinutes += 1440;
 
   bool isSleepTime = false;
@@ -223,13 +264,13 @@ void runCircadianAnimations() {
   if (sleepStartMinutes <= sleepTotalMinutes) {
       if (currentTotalMinutes >= sleepStartMinutes && currentTotalMinutes < sleepTotalMinutes) {
           isSleepTime = true;
-          sleepProgress = (float)((currentTotalMinutes - sleepStartMinutes) * 60 + currentSecondsFloat) / (fadeSleep * 60.0f);
+          sleepProgress = (float)((currentTotalMinutes - sleepStartMinutes) * 60 + currentSecondsFloat) / (todayConfig.fadeSleep * 60.0f);
       }
   } else {
       if (currentTotalMinutes >= sleepStartMinutes || currentTotalMinutes < sleepTotalMinutes) {
           isSleepTime = true;
           int elapsedMinutes = (currentTotalMinutes >= sleepStartMinutes) ? (currentTotalMinutes - sleepStartMinutes) : ((1440 - sleepStartMinutes) + currentTotalMinutes);
-          sleepProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (fadeSleep * 60.0f);
+          sleepProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (todayConfig.fadeSleep * 60.0f);
       }
   }
 
@@ -243,15 +284,20 @@ void runCircadianAnimations() {
   if (isDawnTime && !wasDawnTime) {
       isLiveMode = false;
       isLampOn = true;
+      publishState();
   }
   if (isSleepTime && !wasSleepTime) {
       isLiveMode = false;
       isLampOn = true;
+      publishState();
   }
   
-  // A la fin exacte du coucher de soleil, on éteint la lampe automatiquement
+  // A la fin exacte du coucher de soleil, on éteint la lampe automatiquement si on n'est pas en mode live
   if (!isSleepTime && wasSleepTime && currentTotalMinutes == sleepTotalMinutes) {
-      isLampOn = false;
+      if (!isLiveMode) {
+          isLampOn = false;
+          publishState();
+      }
   }
 
   wasDawnTime = isDawnTime;
@@ -339,18 +385,45 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         currentB = number & 0xFF;
       }
     }
+    
+    if (doc["timer"].is<int>()) {
+      int t = doc["timer"];
+      if (t > 0) {
+        activeTimerDuration = t * 60000UL;
+        liveTimerStart = millis();
+        isTimerActive = true;
+        Serial.print("Timer activé pour ");
+        Serial.print(t);
+        Serial.println(" minutes.");
+      } else {
+        isTimerActive = false;
+      }
+    }
     Serial.println("Action: LIVE appliquée");
+    publishState();
   } else {
     isLiveMode = false;
     
     preferences.begin("config", false);
     
-    if (doc["wakeUpHour"].is<int>()) { wakeUpHour = doc["wakeUpHour"]; preferences.putInt("wakeUpHour", wakeUpHour); }
-    if (doc["wakeUpMinute"].is<int>()) { wakeUpMinute = doc["wakeUpMinute"]; preferences.putInt("wakeUpMinute", wakeUpMinute); }
-    if (doc["sleepHour"].is<int>()) { sleepHour = doc["sleepHour"]; preferences.putInt("sleepHour", sleepHour); }
-    if (doc["sleepMinute"].is<int>()) { sleepMinute = doc["sleepMinute"]; preferences.putInt("sleepMinute", sleepMinute); }
-    if (doc["fadeWakeUp"].is<int>()) { fadeWakeUp = doc["fadeWakeUp"]; preferences.putInt("fadeWakeUp", fadeWakeUp); }
-    if (doc["fadeSleep"].is<int>()) { fadeSleep = doc["fadeSleep"]; preferences.putInt("fadeSleep", fadeSleep); }
+    if (doc["schedules"].is<JsonArray>()) {
+      JsonArray arr = doc["schedules"].as<JsonArray>();
+      for (JsonVariant v : arr) {
+        if (v["day"].is<int>()) {
+          int day = v["day"];
+          if (day >= 0 && day <= 6) {
+            weeklySchedules[day].isActive = v["isActive"] | false;
+            weeklySchedules[day].wakeUpHour = v["wakeUpHour"] | 7;
+            weeklySchedules[day].wakeUpMinute = v["wakeUpMinute"] | 0;
+            weeklySchedules[day].sleepHour = v["sleepHour"] | 22;
+            weeklySchedules[day].sleepMinute = v["sleepMinute"] | 0;
+            weeklySchedules[day].fadeWakeUp = v["fadeWakeUp"] | 30;
+            weeklySchedules[day].fadeSleep = v["fadeSleep"] | 30;
+          }
+        }
+      }
+      preferences.putBytes("schedules", &weeklySchedules, sizeof(weeklySchedules));
+    }
     
     if (doc["useDefaultColors"].is<bool>()) { useDefaultColors = doc["useDefaultColors"]; preferences.putBool("useDefCols", useDefaultColors); }
     
@@ -383,19 +456,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       sleepColors[0] = 0xFFFFFF; sleepColors[1] = 0xFF8000; sleepColors[2] = 0xFF0000; sleepColors[3] = 0x000000;
     }
     
-    if (doc["activeDays"].is<JsonArray>()) {
-      JsonArray arr = doc["activeDays"].as<JsonArray>();
-      uint8_t mask = 0;
-      for (int i=0; i<7; i++) activeDays[i] = false;
-      for (JsonVariant v : arr) {
-        int day = v.as<int>();
-        if (day >= 0 && day <= 6) {
-          activeDays[day] = true;
-          mask |= (1 << day);
-        }
-      }
-      preferences.putUChar("activeDays", mask);
-    }
+    // activeDays is replaced by schedules.
     
     if (doc["exceptions"].is<JsonArray>()) {
       JsonArray arr = doc["exceptions"].as<JsonArray>();
@@ -432,6 +493,7 @@ void maintainMQTTConnection() {
       if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
+        publishState();
         lastMqttReconnectAttempt = 0;
       } else {
         Serial.print("échec, rc=");
@@ -560,22 +622,26 @@ void setup() {
   
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
+  mqttTopicState = "communic8/lampe/" + chipId + "/state";
 
   // Initialisation des données persistantes depuis la mémoire Flash (NVS)
   preferences.begin("config", false);
   numLeds = preferences.getUShort("numLeds", 30);
-  wakeUpHour = preferences.getInt("wakeUpHour", 7);
-  wakeUpMinute = preferences.getInt("wakeUpMinute", 0);
-  sleepHour = preferences.getInt("sleepHour", 22);
-  sleepMinute = preferences.getInt("sleepMinute", 0);
-  fadeWakeUp = preferences.getInt("fadeWakeUp", 30);
-  fadeSleep = preferences.getInt("fadeSleep", 30);
-  useDefaultColors = preferences.getBool("useDefCols", true);
   
-  uint8_t activeDaysMask = preferences.getUChar("activeDays", 0x7F); // 0x7F = 01111111
-  for (int i=0; i<7; i++) {
-    activeDays[i] = (activeDaysMask & (1 << i)) != 0;
+  size_t schLen = preferences.getBytes("schedules", &weeklySchedules, sizeof(weeklySchedules));
+  if (schLen != sizeof(weeklySchedules)) {
+    for (int i=0; i<7; i++) {
+      weeklySchedules[i].isActive = true;
+      weeklySchedules[i].wakeUpHour = 7;
+      weeklySchedules[i].wakeUpMinute = 0;
+      weeklySchedules[i].sleepHour = 22;
+      weeklySchedules[i].sleepMinute = 0;
+      weeklySchedules[i].fadeWakeUp = 30;
+      weeklySchedules[i].fadeSleep = 30;
+    }
   }
+  
+  useDefaultColors = preferences.getBool("useDefCols", true);
   
   String excStr = preferences.getString("exceptions", "");
   numExceptions = 0;
@@ -605,6 +671,7 @@ void setup() {
   Serial.println("CHIP ID : " + chipId);
   Serial.println("MQTT Client ID : " + mqttClientId);
   Serial.println("MQTT Topic (Config) : " + mqttTopicConfig);
+  Serial.println("MQTT Topic (State) : " + mqttTopicState);
   Serial.println("==========================================");
   Serial.println(">>> LIEN D'ASSOCIATION (QR CODE) <<<");
   Serial.println("https://app.aube.studio/claim?deviceId=" + chipId);
@@ -698,6 +765,16 @@ void loop() {
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
       // Evaluation permanente de la planification (aube/coucher)
       runCircadianAnimations();
+      
+      // Gestion du timer
+      if (isLiveMode && isTimerActive && isLampOn) {
+          if (millis() - liveTimerStart >= activeTimerDuration) {
+              isLampOn = false;
+              isTimerActive = false;
+              Serial.println("Fin du timer, extinction de la lampe.");
+              publishState();
+          }
+      }
       
       if (!isLampOn) {
         strip.clear();
