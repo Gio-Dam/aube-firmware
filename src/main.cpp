@@ -48,12 +48,11 @@ DayConfig weeklySchedules[7];
 String exceptions[10];
 int numExceptions = 0;
 
-// Couleurs personnalisées
-bool useDefaultColors = true;
-uint32_t wakeUpColors[10] = {0x000000, 0xFF0000, 0xFF8000, 0xFFFFFF};
-int numWakeUpColors = 4;
-uint32_t sleepColors[10] = {0xFFFFFF, 0xFF8000, 0xFF0000, 0x000000};
-int numSleepColors = 4;
+// Palettes réalistes pour aube et crépuscule
+uint32_t wakeUpColors[7] = {0x000000, 0x08081A, 0x2B164D, 0x8B2252, 0xFF4040, 0xFF7F00, 0xFFE4B5};
+int numWakeUpColors = 7;
+uint32_t sleepColors[7] = {0xFFF1E0, 0xFFB90F, 0xFF6103, 0xB22222, 0x191970, 0x000022, 0x000000};
+int numSleepColors = 7;
 
 // Variables du mode Live (Télécommande)
 bool isLiveMode = false;
@@ -160,6 +159,44 @@ uint32_t getColorForProgress(float progress, uint32_t* colors, int count) {
   uint8_t b = b1 + (b2 - b1) * fraction;
 
   return strip.Color(r, g, b);
+}
+
+// Fonction spéciale pour l'aube et le crépuscule : mélange des couleurs et application de la luminosité en calcul flottant 
+// pour éviter les sauts de valeurs et la perte de couleurs à basse luminosité.
+uint32_t getSmoothColorForProgress(float progress, const uint32_t* colors, int count, float brightnessScale) {
+  if (count == 0) return strip.Color(0, 0, 0);
+  
+  if (progress <= 0.0f) progress = 0.0f;
+  if (progress >= 1.0f) progress = 0.99999f; // Evite de dépasser l'index maximum
+
+  float scaled = progress * (count - 1);
+  int index = (int)scaled;
+  float fraction = scaled - index;
+
+  uint8_t r1 = (colors[index] >> 16) & 0xFF;
+  uint8_t g1 = (colors[index] >> 8) & 0xFF;
+  uint8_t b1 = colors[index] & 0xFF;
+
+  uint8_t r2 = (colors[index + 1] >> 16) & 0xFF;
+  uint8_t g2 = (colors[index + 1] >> 8) & 0xFF;
+  uint8_t b2 = colors[index + 1] & 0xFF;
+
+  // 1. Mélange linéaire en flottant
+  float r_f = r1 + (r2 - r1) * fraction;
+  float g_f = g1 + (g2 - g1) * fraction;
+  float b_f = b1 + (b2 - b1) * fraction;
+
+  // 2. Application de l'échelle de luminosité globale (qui inclut déjà la progression gamma temporelle)
+  r_f *= brightnessScale;
+  g_f *= brightnessScale;
+  b_f *= brightnessScale;
+
+  // 3. Application de la vraie courbe gamma colorimétrique de la LED
+  return strip.Color(
+    strip.gamma8((uint8_t)r_f),
+    strip.gamma8((uint8_t)g_f),
+    strip.gamma8((uint8_t)b_f)
+  );
 }
 
 uint32_t getWrappedColorForProgress(float progress, uint32_t* colors, int count) {
@@ -394,38 +431,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       }
       preferences.putBytes("schedules", &weeklySchedules, sizeof(weeklySchedules));
     }
-    
-    if (doc["useDefaultColors"].is<bool>()) { useDefaultColors = doc["useDefaultColors"]; preferences.putBool("useDefCols", useDefaultColors); }
-    
-    if (doc["wakeUpColors"].is<JsonArray>()) {
-      JsonArray arr = doc["wakeUpColors"].as<JsonArray>();
-      numWakeUpColors = 0;
-      for (JsonVariant v : arr) {
-        if (numWakeUpColors < 10) {
-          String hex = v.as<String>();
-          if (hex.startsWith("#")) wakeUpColors[numWakeUpColors++] = strtol(&hex[1], NULL, 16);
-        }
-      }
-    }
-    
-    if (doc["sleepColors"].is<JsonArray>()) {
-      JsonArray arr = doc["sleepColors"].as<JsonArray>();
-      numSleepColors = 0;
-      for (JsonVariant v : arr) {
-        if (numSleepColors < 10) {
-          String hex = v.as<String>();
-          if (hex.startsWith("#")) sleepColors[numSleepColors++] = strtol(&hex[1], NULL, 16);
-        }
-      }
-    }
-    
-    if (useDefaultColors) {
-      numWakeUpColors = 4;
-      wakeUpColors[0] = 0x000000; wakeUpColors[1] = 0xFF0000; wakeUpColors[2] = 0xFF8000; wakeUpColors[3] = 0xFFFFFF;
-      numSleepColors = 4;
-      sleepColors[0] = 0xFFFFFF; sleepColors[1] = 0xFF8000; sleepColors[2] = 0xFF0000; sleepColors[3] = 0x000000;
-    }
-    
     // activeDays is replaced by schedules.
     
     if (doc["exceptions"].is<JsonArray>()) {
@@ -610,7 +615,7 @@ void setup() {
     }
   }
   
-  useDefaultColors = preferences.getBool("useDefCols", true);
+  // Utilisation des palettes par défaut d'aube et de crépuscule
   
   String excStr = preferences.getString("exceptions", "");
   numExceptions = 0;
@@ -862,9 +867,13 @@ void loop() {
           if (progress > 1.0f) progress = 1.0f;
           if (progress < 0.0f) progress = 0.0f;
           
-          uint32_t color = getColorForProgress(progress, wakeUpColors, numWakeUpColors);
-          strip.setBrightness((uint8_t)(progress * (float)globalBrightness));
-          strip.fill(strip.gamma32(color));
+          // Utilisation de la nouvelle fonction pour une fluidité parfaite à très basse luminosité
+          float gammaProgress = pow(progress, 2.5f);
+          float brightnessScale = gammaProgress * ((float)globalBrightness / 255.0f);
+          uint32_t color = getSmoothColorForProgress(progress, wakeUpColors, numWakeUpColors, brightnessScale);
+          
+          strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
+          strip.fill(color);
           strip.show();
         } else if (currentEffect == "sunset") {
           float progress = 0.0f;
@@ -874,9 +883,13 @@ void loop() {
           if (progress > 1.0f) progress = 1.0f;
           if (progress < 0.0f) progress = 0.0f;
           
-          uint32_t color = getColorForProgress(progress, sleepColors, numSleepColors);
-          strip.setBrightness((uint8_t)((1.0f - progress) * (float)globalBrightness));
-          strip.fill(strip.gamma32(color));
+          // Utilisation de la nouvelle fonction pour une fluidité parfaite à très basse luminosité
+          float gammaProgress = pow(1.0f - progress, 2.5f);
+          float brightnessScale = gammaProgress * ((float)globalBrightness / 255.0f);
+          uint32_t color = getSmoothColorForProgress(progress, sleepColors, numSleepColors, brightnessScale);
+          
+          strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
+          strip.fill(color);
           strip.show();
         }
       }
