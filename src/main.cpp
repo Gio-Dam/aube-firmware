@@ -40,6 +40,10 @@ int sleepMinute = 0;
 int fadeWakeUp = 30; // en minutes
 int fadeSleep = 30; // en minutes
 
+bool activeDays[7] = {true, true, true, true, true, true, true};
+String exceptions[10];
+int numExceptions = 0;
+
 // Couleurs personnalisées
 bool useDefaultColors = true;
 uint32_t wakeUpColors[10] = {0x000000, 0xFF0000, 0xFF8000, 0xFFFFFF};
@@ -57,6 +61,10 @@ uint8_t effectSpeed = 50;
 bool useDefaultEffectColors = true;
 uint32_t effectColors[10] = {0};
 int numEffectColors = 0;
+
+// Variables d'état pour les transitions
+bool wasDawnTime = false;
+bool wasSleepTime = false;
 
 // Configuration MQTT
 const char* mqtt_server = "76.13.43.190";
@@ -163,7 +171,24 @@ void runCircadianAnimations() {
 
   struct tm *ptm = localtime(&epochTime);
   int currentTotalMinutes = ptm->tm_hour * 60 + ptm->tm_min;
-  int currentSecond = ptm->tm_sec;
+  
+  // Inclure les millisecondes pour éviter les à-coups
+  int currentMillisecond = millis() % 1000;
+  float currentSecondsFloat = ptm->tm_sec + (currentMillisecond / 1000.0f);
+  
+  // Vérification de la date et du jour pour les exceptions
+  char dateStr[11];
+  snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
+  
+  bool isException = false;
+  for (int i=0; i<numExceptions; i++) {
+    if (exceptions[i] == String(dateStr)) {
+      isException = true;
+      break;
+    }
+  }
+
+  bool isTodayActive = activeDays[ptm->tm_wday] && !isException;
   
   int wakeUpTotalMinutes = wakeUpHour * 60 + wakeUpMinute;
   int sleepTotalMinutes = sleepHour * 60 + sleepMinute;
@@ -178,39 +203,40 @@ void runCircadianAnimations() {
   if (dawnStartMinutes <= wakeUpTotalMinutes) {
       if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
-          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecond) / (fadeWakeUp * 60.0f);
+          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecondsFloat) / (fadeWakeUp * 60.0f);
       }
   } else {
       if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
           isDawnTime = true;
           int elapsedMinutes = (currentTotalMinutes >= dawnStartMinutes) ? (currentTotalMinutes - dawnStartMinutes) : ((1440 - dawnStartMinutes) + currentTotalMinutes);
-          dawnProgress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeWakeUp * 60.0f);
+          dawnProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (fadeWakeUp * 60.0f);
       }
   }
 
   // Sleep calculations
-  int sleepEndMinutes = sleepTotalMinutes + fadeSleep;
-  if (sleepEndMinutes >= 1440) sleepEndMinutes -= 1440;
+  int sleepStartMinutes = sleepTotalMinutes - fadeSleep;
+  if (sleepStartMinutes < 0) sleepStartMinutes += 1440;
 
   bool isSleepTime = false;
   float sleepProgress = 0.0;
 
-  if (sleepTotalMinutes <= sleepEndMinutes) {
-      if (currentTotalMinutes >= sleepTotalMinutes && currentTotalMinutes < sleepEndMinutes) {
+  if (sleepStartMinutes <= sleepTotalMinutes) {
+      if (currentTotalMinutes >= sleepStartMinutes && currentTotalMinutes < sleepTotalMinutes) {
           isSleepTime = true;
-          sleepProgress = (float)((currentTotalMinutes - sleepTotalMinutes) * 60 + currentSecond) / (fadeSleep * 60.0f);
+          sleepProgress = (float)((currentTotalMinutes - sleepStartMinutes) * 60 + currentSecondsFloat) / (fadeSleep * 60.0f);
       }
   } else {
-      if (currentTotalMinutes >= sleepTotalMinutes || currentTotalMinutes < sleepEndMinutes) {
+      if (currentTotalMinutes >= sleepStartMinutes || currentTotalMinutes < sleepTotalMinutes) {
           isSleepTime = true;
-          int elapsedMinutes = (currentTotalMinutes >= sleepTotalMinutes) ? (currentTotalMinutes - sleepTotalMinutes) : ((1440 - sleepTotalMinutes) + currentTotalMinutes);
-          sleepProgress = (float)(elapsedMinutes * 60 + currentSecond) / (fadeSleep * 60.0f);
+          int elapsedMinutes = (currentTotalMinutes >= sleepStartMinutes) ? (currentTotalMinutes - sleepStartMinutes) : ((1440 - sleepStartMinutes) + currentTotalMinutes);
+          sleepProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (fadeSleep * 60.0f);
       }
   }
 
-  // Tracking state changes to trigger mode switch
-  static bool wasDawnTime = false;
-  static bool wasSleepTime = false;
+  if (!isTodayActive) {
+      isDawnTime = false;
+      isSleepTime = false;
+  }
 
   // Si on entre dans une période de planification, on force le mode alarme et on allume la lampe
   // Cela permet de réveiller la lampe même si elle a été éteinte via la télécommande
@@ -224,7 +250,7 @@ void runCircadianAnimations() {
   }
   
   // A la fin exacte du coucher de soleil, on éteint la lampe automatiquement
-  if (!isSleepTime && wasSleepTime && currentTotalMinutes == sleepEndMinutes) {
+  if (!isSleepTime && wasSleepTime && currentTotalMinutes == sleepTotalMinutes) {
       isLampOn = false;
   }
 
@@ -238,14 +264,14 @@ void runCircadianAnimations() {
           if (dawnProgress < 0.0f) dawnProgress = 0.0f;
           uint32_t color = getColorForProgress(dawnProgress, wakeUpColors, numWakeUpColors);
           strip.setBrightness(255);
-          strip.fill(color);
+          strip.fill(strip.gamma32(color));
           strip.show();
       } else if (isSleepTime) {
           if (sleepProgress > 1.0f) sleepProgress = 1.0f;
           if (sleepProgress < 0.0f) sleepProgress = 0.0f;
           uint32_t color = getColorForProgress(sleepProgress, sleepColors, numSleepColors);
           strip.setBrightness(255);
-          strip.fill(color);
+          strip.fill(strip.gamma32(color));
           strip.show();
       }
   }
@@ -316,14 +342,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     Serial.println("Action: LIVE appliquée");
   } else {
     isLiveMode = false;
-    if (doc["wakeUpHour"].is<int>()) wakeUpHour = doc["wakeUpHour"];
-    if (doc["wakeUpMinute"].is<int>()) wakeUpMinute = doc["wakeUpMinute"];
-    if (doc["sleepHour"].is<int>()) sleepHour = doc["sleepHour"];
-    if (doc["sleepMinute"].is<int>()) sleepMinute = doc["sleepMinute"];
-    if (doc["fadeWakeUp"].is<int>()) fadeWakeUp = doc["fadeWakeUp"];
-    if (doc["fadeSleep"].is<int>()) fadeSleep = doc["fadeSleep"];
     
-    if (doc["useDefaultColors"].is<bool>()) useDefaultColors = doc["useDefaultColors"];
+    preferences.begin("config", false);
+    
+    if (doc["wakeUpHour"].is<int>()) { wakeUpHour = doc["wakeUpHour"]; preferences.putInt("wakeUpHour", wakeUpHour); }
+    if (doc["wakeUpMinute"].is<int>()) { wakeUpMinute = doc["wakeUpMinute"]; preferences.putInt("wakeUpMinute", wakeUpMinute); }
+    if (doc["sleepHour"].is<int>()) { sleepHour = doc["sleepHour"]; preferences.putInt("sleepHour", sleepHour); }
+    if (doc["sleepMinute"].is<int>()) { sleepMinute = doc["sleepMinute"]; preferences.putInt("sleepMinute", sleepMinute); }
+    if (doc["fadeWakeUp"].is<int>()) { fadeWakeUp = doc["fadeWakeUp"]; preferences.putInt("fadeWakeUp", fadeWakeUp); }
+    if (doc["fadeSleep"].is<int>()) { fadeSleep = doc["fadeSleep"]; preferences.putInt("fadeSleep", fadeSleep); }
+    
+    if (doc["useDefaultColors"].is<bool>()) { useDefaultColors = doc["useDefaultColors"]; preferences.putBool("useDefCols", useDefaultColors); }
     
     if (doc["wakeUpColors"].is<JsonArray>()) {
       JsonArray arr = doc["wakeUpColors"].as<JsonArray>();
@@ -354,7 +383,42 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       sleepColors[0] = 0xFFFFFF; sleepColors[1] = 0xFF8000; sleepColors[2] = 0xFF0000; sleepColors[3] = 0x000000;
     }
     
-    Serial.println("Action: ALARM appliquée");
+    if (doc["activeDays"].is<JsonArray>()) {
+      JsonArray arr = doc["activeDays"].as<JsonArray>();
+      uint8_t mask = 0;
+      for (int i=0; i<7; i++) activeDays[i] = false;
+      for (JsonVariant v : arr) {
+        int day = v.as<int>();
+        if (day >= 0 && day <= 6) {
+          activeDays[day] = true;
+          mask |= (1 << day);
+        }
+      }
+      preferences.putUChar("activeDays", mask);
+    }
+    
+    if (doc["exceptions"].is<JsonArray>()) {
+      JsonArray arr = doc["exceptions"].as<JsonArray>();
+      numExceptions = 0;
+      String excStr = "";
+      for (JsonVariant v : arr) {
+        if (numExceptions < 10) {
+          String e = v.as<String>();
+          exceptions[numExceptions++] = e;
+          if (excStr.length() > 0) excStr += ",";
+          excStr += e;
+        }
+      }
+      preferences.putString("exceptions", excStr);
+    }
+    
+    preferences.end();
+    
+    // Réinitialiser les déclencheurs pour appliquer immédiatement la nouvelle configuration
+    wasDawnTime = false;
+    wasSleepTime = false;
+    
+    Serial.println("Action: ALARM appliquée et sauvegardée dans la mémoire Flash.");
   }
 }
 
@@ -497,10 +561,39 @@ void setup() {
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
 
-  // Initialisation du nombre de LEDs depuis la mémoire
+  // Initialisation des données persistantes depuis la mémoire Flash (NVS)
   preferences.begin("config", false);
   numLeds = preferences.getUShort("numLeds", 30);
+  wakeUpHour = preferences.getInt("wakeUpHour", 7);
+  wakeUpMinute = preferences.getInt("wakeUpMinute", 0);
+  sleepHour = preferences.getInt("sleepHour", 22);
+  sleepMinute = preferences.getInt("sleepMinute", 0);
+  fadeWakeUp = preferences.getInt("fadeWakeUp", 30);
+  fadeSleep = preferences.getInt("fadeSleep", 30);
+  useDefaultColors = preferences.getBool("useDefCols", true);
+  
+  uint8_t activeDaysMask = preferences.getUChar("activeDays", 0x7F); // 0x7F = 01111111
+  for (int i=0; i<7; i++) {
+    activeDays[i] = (activeDaysMask & (1 << i)) != 0;
+  }
+  
+  String excStr = preferences.getString("exceptions", "");
+  numExceptions = 0;
+  if (excStr.length() > 0) {
+    int startIdx = 0;
+    while(startIdx < excStr.length() && numExceptions < 10) {
+      int commaIdx = excStr.indexOf(',', startIdx);
+      if (commaIdx == -1) {
+        exceptions[numExceptions++] = excStr.substring(startIdx);
+        break;
+      } else {
+        exceptions[numExceptions++] = excStr.substring(startIdx, commaIdx);
+        startIdx = commaIdx + 1;
+      }
+    }
+  }
   preferences.end();
+  
   strip.updateLength(numLeds);
 
   strip.begin();
