@@ -191,11 +191,11 @@ uint32_t getSmoothColorForProgress(float progress, const uint32_t* colors, int c
   g_f *= brightnessScale;
   b_f *= brightnessScale;
 
-  // 3. Application de la vraie courbe gamma colorimétrique de la LED
+  // 3. Conversion en entiers (la courbe exponentielle a déjà été appliquée via brightnessScale)
   return strip.Color(
-    strip.gamma8((uint8_t)r_f),
-    strip.gamma8((uint8_t)g_f),
-    strip.gamma8((uint8_t)b_f)
+    (uint8_t)r_f,
+    (uint8_t)g_f,
+    (uint8_t)b_f
   );
 }
 
@@ -868,7 +868,7 @@ void loop() {
           if (progress < 0.0f) progress = 0.0f;
           
           // Utilisation de la nouvelle fonction pour une fluidité parfaite à très basse luminosité
-          float gammaProgress = pow(progress, 2.5f);
+          float gammaProgress = pow(progress, 2.0f); // Courbe douce sans écraser les couleurs
           float brightnessScale = gammaProgress * ((float)globalBrightness / 255.0f);
           uint32_t color = getSmoothColorForProgress(progress, wakeUpColors, numWakeUpColors, brightnessScale);
           
@@ -884,7 +884,7 @@ void loop() {
           if (progress < 0.0f) progress = 0.0f;
           
           // Utilisation de la nouvelle fonction pour une fluidité parfaite à très basse luminosité
-          float gammaProgress = pow(1.0f - progress, 2.5f);
+          float gammaProgress = pow(1.0f - progress, 2.0f); // Courbe douce sans écraser les couleurs
           float brightnessScale = gammaProgress * ((float)globalBrightness / 255.0f);
           uint32_t color = getSmoothColorForProgress(progress, sleepColors, numSleepColors, brightnessScale);
           
