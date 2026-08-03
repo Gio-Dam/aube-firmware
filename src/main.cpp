@@ -53,6 +53,10 @@ bool isLampOn = true;
 uint8_t currentR = 255, currentG = 140, currentB = 0;
 uint8_t globalBrightness = 255;
 String currentEffect = "static";
+uint8_t effectSpeed = 50;
+bool useDefaultEffectColors = true;
+uint32_t effectColors[10] = {0};
+int numEffectColors = 0;
 
 // Configuration MQTT
 const char* mqtt_server = "76.13.43.190";
@@ -105,6 +109,34 @@ uint32_t getColorForProgress(float progress, uint32_t* colors, int count) {
   uint8_t g = g1 + (g2 - g1) * fraction;
   uint8_t b = b1 + (b2 - b1) * fraction;
 
+  return strip.Color(r, g, b);
+}
+
+uint32_t getWrappedColorForProgress(float progress, uint32_t* colors, int count) {
+  if (count == 0) return strip.Color(0, 0, 0);
+  if (count == 1) return colors[0];
+  
+  progress = progress - (long)progress;
+  if (progress < 0) progress += 1.0;
+  
+  float scaled = progress * count;
+  int index = (int)scaled;
+  float fraction = scaled - index;
+  
+  int nextIndex = (index + 1) % count;
+  
+  uint8_t r1 = (colors[index] >> 16) & 0xFF;
+  uint8_t g1 = (colors[index] >> 8) & 0xFF;
+  uint8_t b1 = colors[index] & 0xFF;
+  
+  uint8_t r2 = (colors[nextIndex] >> 16) & 0xFF;
+  uint8_t g2 = (colors[nextIndex] >> 8) & 0xFF;
+  uint8_t b2 = colors[nextIndex] & 0xFF;
+  
+  uint8_t r = r1 + (r2 - r1) * fraction;
+  uint8_t g = g1 + (g2 - g1) * fraction;
+  uint8_t b = b1 + (b2 - b1) * fraction;
+  
   return strip.Color(r, g, b);
 }
 
@@ -258,6 +290,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (doc["brightness"].is<int>()) globalBrightness = doc["brightness"];
     if (doc["effect"].is<String>()) currentEffect = doc["effect"].as<String>();
     
+    if (doc["effectSpeed"].is<int>()) effectSpeed = doc["effectSpeed"];
+    if (doc["useDefaultEffectColors"].is<bool>()) useDefaultEffectColors = doc["useDefaultEffectColors"];
+    
+    if (doc["effectColors"].is<JsonArray>()) {
+      JsonArray arr = doc["effectColors"].as<JsonArray>();
+      numEffectColors = 0;
+      for (JsonVariant v : arr) {
+        if (numEffectColors < 10) {
+          String hex = v.as<String>();
+          if (hex.startsWith("#")) effectColors[numEffectColors++] = strtol(&hex[1], NULL, 16);
+        }
+      }
+    }
+
     if (doc["color"].is<String>()) {
       String hexColor = doc["color"].as<String>();
       if (hexColor.startsWith("#") && hexColor.length() == 7) {
@@ -567,24 +613,97 @@ void loop() {
         strip.setBrightness(globalBrightness);
         
         static uint16_t rainbowHue = 0;
+        float speedMult = effectSpeed > 0 ? (effectSpeed / 50.0f) : 0.01f;
         
         if (currentEffect == "static") {
           strip.fill(strip.Color(currentR, currentG, currentB));
           strip.show();
         } else if (currentEffect == "pulse") {
-          float val = (sin(millis() / 500.0) + 1.0) / 2.0; 
+          float val = (sin(millis() / (500.0 / speedMult)) + 1.0) / 2.0; 
           uint8_t r = val * currentR;
           uint8_t g = val * currentG;
           uint8_t b = val * currentB;
+          
+          if (!useDefaultEffectColors && numEffectColors > 0) {
+            float progress = (sin(millis() / (1000.0 / speedMult)) + 1.0) / 2.0; 
+            uint32_t color = getWrappedColorForProgress(progress, effectColors, numEffectColors);
+            r = (color >> 16) & 0xFF;
+            g = (color >> 8) & 0xFF;
+            b = color & 0xFF;
+          }
+          
           strip.fill(strip.Color(r, g, b));
           strip.show();
-        } else if (currentEffect == "rainbow") {
-          strip.fill(strip.ColorHSV(rainbowHue, 255, 255));
+        } else if (currentEffect == "wave") {
+          for(int i=0; i<numLeds; i++) {
+            float wave = (sin((i * 0.3) + (millis() / (300.0 / speedMult))) + 1.0) / 2.0;
+            
+            if (!useDefaultEffectColors && numEffectColors > 0) {
+               float progressOffset = (millis() * speedMult) / 2000.0;
+               uint32_t color = getWrappedColorForProgress(progressOffset + (i / 10.0), effectColors, numEffectColors);
+               uint8_t r = ((color >> 16) & 0xFF) * wave;
+               uint8_t g = ((color >> 8) & 0xFF) * wave;
+               uint8_t b = (color & 0xFF) * wave;
+               strip.setPixelColor(i, strip.Color(r, g, b));
+            } else {
+               strip.setPixelColor(i, strip.Color(currentR * wave, currentG * wave, currentB * wave));
+            }
+          }
           strip.show();
-          rainbowHue += 256;
+        } else if (currentEffect == "color_cycle") {
+          strip.fill(strip.gamma32(strip.ColorHSV(rainbowHue)));
+          strip.show();
+          rainbowHue += (uint16_t)(256 * speedMult);
+        } else if (currentEffect == "rainbow") {
+          if (!useDefaultEffectColors && numEffectColors > 0) {
+            float progressOffset = (millis() * speedMult) / 5000.0;
+            for(int i=0; i<numLeds; i++) {
+              float p = progressOffset + (i / (float)numLeds);
+              strip.setPixelColor(i, getWrappedColorForProgress(p, effectColors, numEffectColors));
+            }
+            strip.show();
+          } else {
+            for(int i=0; i<numLeds; i++) {
+              int pixelHue = rainbowHue + (i * 65536L / numLeds);
+              strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
+            }
+            strip.show();
+            rainbowHue += (uint16_t)(256 * speedMult);
+          }
+        } else if (currentEffect == "chase") {
+          static int chaseStep = 0;
+          static unsigned long lastChaseUpdate = 0;
+          if (millis() - lastChaseUpdate > (50 / speedMult)) {
+            lastChaseUpdate = millis();
+            strip.clear();
+            for(int i=chaseStep; i<numLeds; i+=3) {
+              if (!useDefaultEffectColors && numEffectColors > 0) {
+                float p = (millis() * speedMult) / 2000.0;
+                strip.setPixelColor(i, getWrappedColorForProgress(p, effectColors, numEffectColors));
+              } else {
+                strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
+              }
+            }
+            strip.show();
+            chaseStep++;
+            if(chaseStep >= 3) chaseStep = 0;
+          }
+        } else if (currentEffect == "sparkle") {
+          for(int i=0; i<numLeds; i++) {
+            strip.setPixelColor(i, strip.Color(currentR/2, currentG/2, currentB/2));
+          }
+          if (random(100) < (50 * speedMult)) {
+            int pixel = random(numLeds);
+            if (!useDefaultEffectColors && numEffectColors > 0) {
+               strip.setPixelColor(pixel, getWrappedColorForProgress(random(100)/100.0, effectColors, numEffectColors));
+            } else {
+               strip.setPixelColor(pixel, strip.Color(255, 255, 255));
+            }
+          }
+          strip.show();
         } else if (currentEffect == "fire") {
           for(int i = 0; i < numLeds; i++) {
-            int flicker = random(0, 50);
+            int flicker = random(0, 50 * speedMult);
             int r1 = currentR - flicker;
             int g1 = currentG - flicker;
             int b1 = currentB - flicker;
