@@ -71,9 +71,11 @@ unsigned long liveTimerStart = 0;
 unsigned long activeTimerDuration = 0;
 bool isTimerActive = false;
 
-// Variables d'état pour les transitions
-bool wasDawnTime = false;
-bool wasSleepTime = false;
+// Variables pour les transitions aube/crépuscule
+unsigned long sunriseStartTime = 0;
+unsigned long sunriseDurationMillis = 0;
+unsigned long sunsetStartTime = 0;
+unsigned long sunsetDurationMillis = 0;
 
 // Configuration MQTT
 const char* mqtt_server = "76.13.43.190";
@@ -203,125 +205,6 @@ void updateTime() {
   }
 }
 
-void runCircadianAnimations() {
-  if (!isTimeInitialized) return;
-
-  time_t epochTime = timeClient.getEpochTime();
-  if (epochTime < 100000) return; // Ignore si le temps n'est pas encore synchronisé
-
-  struct tm *ptm = localtime(&epochTime);
-  int currentTotalMinutes = ptm->tm_hour * 60 + ptm->tm_min;
-  
-  // Inclure les millisecondes pour éviter les à-coups
-  int currentMillisecond = millis() % 1000;
-  float currentSecondsFloat = ptm->tm_sec + (currentMillisecond / 1000.0f);
-  
-  // Vérification de la date et du jour pour les exceptions
-  char dateStr[11];
-  snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
-  
-  bool isException = false;
-  for (int i=0; i<numExceptions; i++) {
-    if (exceptions[i] == String(dateStr)) {
-      isException = true;
-      break;
-    }
-  }
-
-  DayConfig todayConfig = weeklySchedules[ptm->tm_wday];
-  bool isTodayActive = todayConfig.isActive && !isException;
-  
-  int wakeUpTotalMinutes = todayConfig.wakeUpHour * 60 + todayConfig.wakeUpMinute;
-  int sleepTotalMinutes = todayConfig.sleepHour * 60 + todayConfig.sleepMinute;
-  
-  // Dawn calculations
-  int dawnStartMinutes = wakeUpTotalMinutes - todayConfig.fadeWakeUp;
-  if (dawnStartMinutes < 0) dawnStartMinutes += 1440;
-
-  bool isDawnTime = false;
-  float dawnProgress = 0.0;
-  
-  if (dawnStartMinutes <= wakeUpTotalMinutes) {
-      if (currentTotalMinutes >= dawnStartMinutes && currentTotalMinutes < wakeUpTotalMinutes) {
-          isDawnTime = true;
-          dawnProgress = (float)((currentTotalMinutes - dawnStartMinutes) * 60 + currentSecondsFloat) / (todayConfig.fadeWakeUp * 60.0f);
-      }
-  } else {
-      if (currentTotalMinutes >= dawnStartMinutes || currentTotalMinutes < wakeUpTotalMinutes) {
-          isDawnTime = true;
-          int elapsedMinutes = (currentTotalMinutes >= dawnStartMinutes) ? (currentTotalMinutes - dawnStartMinutes) : ((1440 - dawnStartMinutes) + currentTotalMinutes);
-          dawnProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (todayConfig.fadeWakeUp * 60.0f);
-      }
-  }
-
-  // Sleep calculations
-  int sleepStartMinutes = sleepTotalMinutes - todayConfig.fadeSleep;
-  if (sleepStartMinutes < 0) sleepStartMinutes += 1440;
-
-  bool isSleepTime = false;
-  float sleepProgress = 0.0;
-
-  if (sleepStartMinutes <= sleepTotalMinutes) {
-      if (currentTotalMinutes >= sleepStartMinutes && currentTotalMinutes < sleepTotalMinutes) {
-          isSleepTime = true;
-          sleepProgress = (float)((currentTotalMinutes - sleepStartMinutes) * 60 + currentSecondsFloat) / (todayConfig.fadeSleep * 60.0f);
-      }
-  } else {
-      if (currentTotalMinutes >= sleepStartMinutes || currentTotalMinutes < sleepTotalMinutes) {
-          isSleepTime = true;
-          int elapsedMinutes = (currentTotalMinutes >= sleepStartMinutes) ? (currentTotalMinutes - sleepStartMinutes) : ((1440 - sleepStartMinutes) + currentTotalMinutes);
-          sleepProgress = (float)(elapsedMinutes * 60 + currentSecondsFloat) / (todayConfig.fadeSleep * 60.0f);
-      }
-  }
-
-  if (!isTodayActive) {
-      isDawnTime = false;
-      isSleepTime = false;
-  }
-
-  // Si on entre dans une période de planification, on force le mode alarme et on allume la lampe
-  // Cela permet de réveiller la lampe même si elle a été éteinte via la télécommande
-  if (isDawnTime && !wasDawnTime) {
-      isLiveMode = false;
-      isLampOn = true;
-      publishState();
-  }
-  if (isSleepTime && !wasSleepTime) {
-      isLiveMode = false;
-      isLampOn = true;
-      publishState();
-  }
-  
-  // A la fin exacte du coucher de soleil, on éteint la lampe automatiquement si on n'est pas en mode live
-  if (!isSleepTime && wasSleepTime && currentTotalMinutes == sleepTotalMinutes) {
-      if (!isLiveMode) {
-          isLampOn = false;
-          publishState();
-      }
-  }
-
-  wasDawnTime = isDawnTime;
-  wasSleepTime = isSleepTime;
-
-  // Mise à jour visuelle si on est en mode planification et que la lampe est allumée
-  if (isLampOn && !isLiveMode) {
-      if (isDawnTime) {
-          if (dawnProgress > 1.0f) dawnProgress = 1.0f;
-          if (dawnProgress < 0.0f) dawnProgress = 0.0f;
-          uint32_t color = getColorForProgress(dawnProgress, wakeUpColors, numWakeUpColors);
-          strip.setBrightness(255);
-          strip.fill(strip.gamma32(color));
-          strip.show();
-      } else if (isSleepTime) {
-          if (sleepProgress > 1.0f) sleepProgress = 1.0f;
-          if (sleepProgress < 0.0f) sleepProgress = 0.0f;
-          uint32_t color = getColorForProgress(sleepProgress, sleepColors, numSleepColors);
-          strip.setBrightness(255);
-          strip.fill(strip.gamma32(color));
-          strip.show();
-      }
-  }
-}
 
 // --- MQTT ---
 
@@ -360,7 +243,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     isLiveMode = true;
     if (doc["state"].is<String>()) isLampOn = (doc["state"].as<String>() == "ON");
     if (doc["brightness"].is<int>()) globalBrightness = doc["brightness"];
-    if (doc["effect"].is<String>()) currentEffect = doc["effect"].as<String>();
+    if (doc["effect"].is<String>()) {
+      currentEffect = doc["effect"].as<String>();
+      if (currentEffect == "sunrise") {
+        sunriseDurationMillis = (doc["fadeWakeUp"].is<int>() ? (unsigned long)doc["fadeWakeUp"] : 30) * 60000UL;
+        sunriseStartTime = millis();
+        Serial.print("Aube démarrée pour ");
+        Serial.print(sunriseDurationMillis / 60000UL);
+        Serial.println(" minutes.");
+      } else if (currentEffect == "sunset") {
+        sunsetDurationMillis = (doc["fadeSleep"].is<int>() ? (unsigned long)doc["fadeSleep"] : 30) * 60000UL;
+        sunsetStartTime = millis();
+        Serial.print("Crépuscule démarré pour ");
+        Serial.print(sunsetDurationMillis / 60000UL);
+        Serial.println(" minutes.");
+      }
+    }
     
     if (doc["effectSpeed"].is<int>()) effectSpeed = doc["effectSpeed"];
     if (doc["useDefaultEffectColors"].is<bool>()) useDefaultEffectColors = doc["useDefaultEffectColors"];
@@ -476,8 +374,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     preferences.end();
     
     // Réinitialiser les déclencheurs pour appliquer immédiatement la nouvelle configuration
-    wasDawnTime = false;
-    wasSleepTime = false;
+    // Les variables wasDawnTime et wasSleepTime ont été supprimées
     
     Serial.println("Action: ALARM appliquée et sauvegardée dans la mémoire Flash.");
   }
@@ -763,8 +660,7 @@ void loop() {
   if (now - lastUpdate > 20) { // 20ms = ~50 FPS pour une fluidité parfaite
     lastUpdate = now;
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
-      // Evaluation permanente de la planification (aube/coucher)
-      runCircadianAnimations();
+      // Planification (aube/coucher) désactivée car maintenant pilotée par le cloud
       
       // Gestion du timer
       if (isLiveMode && isTimerActive && isLampOn) {
@@ -885,6 +781,30 @@ void loop() {
           strip.show();
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
+          strip.show();
+        } else if (currentEffect == "sunrise") {
+          float progress = 0.0f;
+          if (sunriseDurationMillis > 0) {
+            progress = (float)(millis() - sunriseStartTime) / sunriseDurationMillis;
+          }
+          if (progress > 1.0f) progress = 1.0f;
+          if (progress < 0.0f) progress = 0.0f;
+          
+          uint32_t color = getColorForProgress(progress, wakeUpColors, numWakeUpColors);
+          strip.setBrightness((uint8_t)(progress * (float)globalBrightness));
+          strip.fill(strip.gamma32(color));
+          strip.show();
+        } else if (currentEffect == "sunset") {
+          float progress = 0.0f;
+          if (sunsetDurationMillis > 0) {
+            progress = (float)(millis() - sunsetStartTime) / sunsetDurationMillis;
+          }
+          if (progress > 1.0f) progress = 1.0f;
+          if (progress < 0.0f) progress = 0.0f;
+          
+          uint32_t color = getColorForProgress(progress, sleepColors, numSleepColors);
+          strip.setBrightness((uint8_t)((1.0f - progress) * (float)globalBrightness));
+          strip.fill(strip.gamma32(color));
           strip.show();
         }
       }
