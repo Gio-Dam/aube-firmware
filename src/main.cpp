@@ -1,5 +1,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <Update.h>
+
+#define HARDWARE_MODEL "c8-alpha"
+#define FIRMWARE_VERSION "1.0.0"
+#define API_BASE_URL "https://iot.comm-unic8.fr"
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
@@ -13,6 +20,7 @@
 String chipId;
 String mqttTopicConfig;
 String mqttTopicState;
+String mqttTopicStatus;
 String mqttClientId;
 
 Preferences preferences;
@@ -457,6 +465,69 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+void publishStatus() {
+  if (!client.connected()) return;
+  JsonDocument doc;
+  doc["version"] = FIRMWARE_VERSION;
+  doc["model"] = HARDWARE_MODEL;
+  String output;
+  serializeJson(doc, output);
+  client.publish(mqttTopicStatus.c_str(), output.c_str(), true);
+  Serial.print("Statut publié: ");
+  Serial.println(output);
+}
+
+void checkForUpdates() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Contourne la vérification SSL
+    
+    HTTPClient http;
+    String url = String(API_BASE_URL) + "/api/ota?deviceId=" + chipId;
+    
+    Serial.println("Vérification des mises à jour OTA...");
+    http.begin(secureClient, url);
+    int httpCode = http.GET();
+    
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      JsonDocument doc;
+      deserializeJson(doc, payload);
+      
+      if (doc["updateAvailable"] == true && doc["downloadUrl"].is<String>()) {
+        String downloadUrl = doc["downloadUrl"].as<String>();
+        Serial.println("Mise à jour disponible ! Téléchargement depuis : " + downloadUrl);
+        
+        HTTPClient httpOta;
+        httpOta.begin(secureClient, downloadUrl);
+        int dlCode = httpOta.GET();
+        if (dlCode == HTTP_CODE_OK) {
+          int contentLength = httpOta.getSize();
+          bool canBegin = Update.begin(contentLength);
+          if (canBegin) {
+            WiFiClient * stream = httpOta.getStreamPtr();
+            size_t written = Update.writeStream(*stream);
+            if (written == contentLength) {
+              Serial.println("Mise à jour réussie. Redémarrage...");
+              if (Update.end()) {
+                ESP.restart();
+              }
+            } else {
+              Serial.println("Erreur de téléchargement du firmware.");
+            }
+          }
+        }
+        httpOta.end();
+      } else {
+        Serial.println("Aucune mise à jour disponible.");
+      }
+    } else {
+      Serial.printf("Erreur HTTP lors de la vérification OTA : %d\n", httpCode);
+    }
+    http.end();
+  }
+}
+
 void maintainMQTTConnection() {
   if (!client.connected()) {
     unsigned long now = millis();
@@ -468,6 +539,7 @@ void maintainMQTTConnection() {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
         publishState();
+        publishStatus();
         lastMqttReconnectAttempt = 0;
       } else {
         Serial.print("échec, rc=");
@@ -597,6 +669,7 @@ void setup() {
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
   mqttTopicState = "communic8/lampe/" + chipId + "/state";
+  mqttTopicStatus = "communic8/lampe/" + chipId + "/status";
 
   // Initialisation des données persistantes depuis la mémoire Flash (NVS)
   preferences.begin("config", false);
@@ -664,6 +737,8 @@ void setup() {
     connectToWiFi();
     if (!wifiProvisioned) {
       startAPMode();
+    } else {
+      checkForUpdates();
     }
   } else {
     startAPMode();
