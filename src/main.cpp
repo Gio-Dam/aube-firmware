@@ -4,7 +4,7 @@
 #include <Update.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "v0.0.1"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -27,6 +27,9 @@ Preferences preferences;
 bool wifiProvisioned = false;
 String storedSSID = "";
 String storedPass = "";
+
+void checkForUpdates();
+
 
 WebServer server(80);
 bool inAPMode = false;
@@ -100,6 +103,15 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 unsigned long lastUpdate = 0;
 bool isTimeInitialized = false;
+
+// --- GESTION DES LOGS A DISTANCE ---
+void remoteLog(String msg) {
+  Serial.println(msg);
+  if (client.connected() && chipId.length() > 0) {
+    String logTopic = "communic8/lampe/" + chipId + "/log";
+    client.publish(logTopic.c_str(), msg.c_str());
+  }
+}
 
 // --- GESTION DES ETATS ---
 
@@ -490,13 +502,23 @@ void publishStatus() {
 
 void checkForUpdates() {
   if (WiFi.status() == WL_CONNECTED) {
+    // Clignotement orange pour indiquer la vérification des mises à jour
+    for(int i = 0; i < 3; i++) {
+        strip.fill(strip.Color(255, 100, 0));
+        strip.show();
+        delay(300);
+        strip.clear();
+        strip.show();
+        delay(300);
+    }
+    
     WiFiClientSecure secureClient;
     secureClient.setInsecure(); // Contourne la vérification SSL
     
     HTTPClient http;
     String url = String(API_BASE_URL) + "/api/ota?deviceId=" + chipId;
     
-    Serial.println("Vérification des mises à jour OTA...");
+    remoteLog("Vérification des mises à jour OTA sur : " + url);
     http.begin(secureClient, url);
     int httpCode = http.GET();
     
@@ -509,6 +531,42 @@ void checkForUpdates() {
         String downloadUrl = doc["downloadUrl"].as<String>();
         Serial.println("Mise à jour disponible ! Téléchargement depuis : " + downloadUrl);
         
+        // Clignote 5x en rouge pour annoncer la mise à jour
+        for(int i = 0; i < 5; i++) {
+            strip.fill(strip.Color(255, 0, 0));
+            strip.show();
+            delay(300);
+            strip.clear();
+            strip.show();
+            delay(300);
+        }
+        
+        // Configurer le callback de progression OTA
+        Update.onProgress([](size_t progress, size_t total) {
+          static int lastPercent = -1;
+          int percent = (progress * 100) / total;
+          
+          // Produit en croix pour allumer les LEDs proportionnellement au téléchargement
+          int ledsToLight = (percent * numLeds) / 100;
+          strip.clear();
+          for(int i = 0; i < ledsToLight; i++) {
+              strip.setPixelColor(i, strip.Color(255, 0, 0));
+          }
+          strip.show();
+
+          if (percent != lastPercent && percent % 5 == 0) { // Envoi MQTT tous les 5%
+            lastPercent = percent;
+            if (client.connected()) {
+              JsonDocument docP;
+              docP["state"] = "UPDATING";
+              docP["progress"] = percent;
+              String output;
+              serializeJson(docP, output);
+              client.publish(mqttTopicState.c_str(), output.c_str(), true); // retain=true
+            }
+          }
+        });
+        
         HTTPClient httpOta;
         httpOta.begin(secureClient, downloadUrl);
         int dlCode = httpOta.GET();
@@ -519,21 +577,21 @@ void checkForUpdates() {
             WiFiClient * stream = httpOta.getStreamPtr();
             size_t written = Update.writeStream(*stream);
             if (written == contentLength) {
-              Serial.println("Mise à jour réussie. Redémarrage...");
+              remoteLog("Mise à jour réussie. Redémarrage...");
               if (Update.end()) {
                 ESP.restart();
               }
             } else {
-              Serial.println("Erreur de téléchargement du firmware.");
+              remoteLog("Erreur de téléchargement du firmware.");
             }
           }
         }
         httpOta.end();
       } else {
-        Serial.println("Aucune mise à jour disponible.");
+        remoteLog("Aucune mise à jour disponible.");
       }
     } else {
-      Serial.printf("Erreur HTTP lors de la vérification OTA : %d\n", httpCode);
+      remoteLog("Erreur HTTP lors de la vérification OTA : " + String(httpCode));
     }
     http.end();
   }
@@ -650,8 +708,7 @@ void connectToWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connecté.");
-    Serial.println(WiFi.localIP());
+    remoteLog("WiFi connecté. IP : " + WiFi.localIP().toString());
     wifiProvisioned = true;
     wifiFailedAttempts = 0;
     strip.clear();
