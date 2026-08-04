@@ -4,7 +4,7 @@
 #include <Update.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.1"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -263,6 +263,11 @@ void checkSchedules() {
   static int lastTriggeredMinute = -1;
   if (lastTriggeredMinute == currentTotalMinutes) return; // Déjà vérifié pour cette minute
 
+  if (ptm->tm_hour == 12 && ptm->tm_min == 0) {
+    Serial.println("⏰ 12h00 : Vérification automatique des mises à jour OTA...");
+    checkForUpdates();
+  }
+
   // Vérification de la date et du jour pour les exceptions
   char dateStr[11];
   snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
@@ -354,6 +359,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.print("Nombre de LEDs mis à jour: ");
       Serial.println(numLeds);
     }
+  }
+
+  if (action == "update") {
+    Serial.println("Action: UPDATE - Vérification des mises à jour demandée via MQTT...");
+    checkForUpdates();
+    return;
   }
 
   if (action == "live") {
