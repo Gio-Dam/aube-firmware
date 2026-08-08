@@ -4,7 +4,7 @@
 #include <Update.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.0.3"
+#define FIRMWARE_VERSION "v0.0.4"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -1017,6 +1017,38 @@ void loop() {
             if (g1 < 0) g1 = 0;
             if (b1 < 0) b1 = 0;
             strip.setPixelColor(i, strip.Color(r1, g1, b1));
+          }
+        } else if (currentEffect == "meteor") {
+          static int meteorPos = 0;
+          static unsigned long lastMeteorUpdate = 0;
+          
+          if (millis() - lastMeteorUpdate > (50 / speedMult)) {
+             lastMeteorUpdate = millis();
+             meteorPos++;
+             if (meteorPos >= numLeds + 15) {
+                meteorPos = 0;
+             }
+          }
+          
+          for (int i = 0; i < numLeds; i++) {
+             int distance = meteorPos - i;
+             if (distance >= 0 && distance < 10) {
+                float intensity = 1.0f - (distance / 10.0f);
+                intensity = intensity * intensity * intensity;
+                
+                if (!useDefaultEffectColors && numEffectColors > 0) {
+                   float p = (millis() * speedMult) / 2000.0;
+                   uint32_t color = getWrappedColorForProgress(p, effectColors, numEffectColors);
+                   uint8_t r = ((color >> 16) & 0xFF) * intensity;
+                   uint8_t g = ((color >> 8) & 0xFF) * intensity;
+                   uint8_t b = (color & 0xFF) * intensity;
+                   strip.setPixelColor(i, strip.Color(r, g, b));
+                } else {
+                   strip.setPixelColor(i, strip.Color(currentR * intensity, currentG * intensity, currentB * intensity));
+                }
+             } else {
+                strip.setPixelColor(i, 0);
+             }
           }
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
