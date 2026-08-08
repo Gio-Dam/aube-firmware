@@ -4,7 +4,7 @@
 #include <Update.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.0.1"
+#define FIRMWARE_VERSION "v0.0.3"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -568,9 +568,10 @@ void checkForUpdates() {
         });
         
         HTTPClient httpOta;
+        httpOta.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
         httpOta.begin(secureClient, downloadUrl);
         int dlCode = httpOta.GET();
-        if (dlCode == HTTP_CODE_OK) {
+        if (dlCode == HTTP_CODE_OK || dlCode == HTTP_CODE_MOVED_PERMANENTLY || dlCode == HTTP_CODE_FOUND) {
           int contentLength = httpOta.getSize();
           bool canBegin = Update.begin(contentLength);
           if (canBegin) {
@@ -582,9 +583,13 @@ void checkForUpdates() {
                 ESP.restart();
               }
             } else {
-              remoteLog("Erreur de téléchargement du firmware.");
+              remoteLog("Erreur d'écriture OTA (taille incorrecte).");
             }
+          } else {
+             remoteLog("Erreur Update.begin (espace insuffisant ?)");
           }
+        } else {
+          remoteLog("Erreur HTTP au téléchargement du firmware : " + String(dlCode));
         }
         httpOta.end();
       } else {
@@ -892,10 +897,33 @@ void loop() {
           }
       }
       
-      if (!isLampOn) {
+      // Gestion de la transition d'allumage / extinction
+      static bool wasLampOn = isLampOn;
+      static unsigned long transitionStartTime = 0;
+      static bool inTransition = false;
+
+      if (isLampOn != wasLampOn) {
+        inTransition = true;
+        transitionStartTime = millis();
+        wasLampOn = isLampOn;
+      }
+
+      int litLeds = isLampOn ? numLeds : 0;
+      if (inTransition) {
+        unsigned long elapsed = millis() - transitionStartTime;
+        float progress = (float)elapsed / 1000.0f; // 1 seconde de transition totale
+        if (progress >= 1.0f) {
+          inTransition = false;
+        } else {
+          // On allume progressivement de 0 à numLeds, ou on éteint de numLeds à 0
+          litLeds = isLampOn ? (progress * numLeds) : ((1.0f - progress) * numLeds);
+        }
+      }
+
+      if (litLeds == 0 && !isLampOn && !inTransition) {
         strip.clear();
         strip.show();
-      } else if (isLiveMode) {
+      } else if (isLiveMode || inTransition) {
         strip.setBrightness(globalBrightness);
         
         static uint16_t rainbowHue = 0;
@@ -903,7 +931,6 @@ void loop() {
         
         if (currentEffect == "static") {
           strip.fill(strip.Color(currentR, currentG, currentB));
-          strip.show();
         } else if (currentEffect == "pulse") {
           float val = (sin(millis() / (500.0 / speedMult)) + 1.0) / 2.0; 
           uint8_t r = val * currentR;
@@ -919,7 +946,6 @@ void loop() {
           }
           
           strip.fill(strip.Color(r, g, b));
-          strip.show();
         } else if (currentEffect == "wave") {
           for(int i=0; i<numLeds; i++) {
             float wave = (sin((i * 0.3) + (millis() / (300.0 / speedMult))) + 1.0) / 2.0;
@@ -935,10 +961,8 @@ void loop() {
                strip.setPixelColor(i, strip.Color(currentR * wave, currentG * wave, currentB * wave));
             }
           }
-          strip.show();
         } else if (currentEffect == "color_cycle") {
           strip.fill(strip.gamma32(strip.ColorHSV(rainbowHue)));
-          strip.show();
           rainbowHue += (uint16_t)(256 * speedMult);
         } else if (currentEffect == "rainbow") {
           if (!useDefaultEffectColors && numEffectColors > 0) {
@@ -947,13 +971,11 @@ void loop() {
               float p = progressOffset + (i / (float)numLeds);
               strip.setPixelColor(i, getWrappedColorForProgress(p, effectColors, numEffectColors));
             }
-            strip.show();
           } else {
             for(int i=0; i<numLeds; i++) {
               int pixelHue = rainbowHue + (i * 65536L / numLeds);
               strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
             }
-            strip.show();
             rainbowHue += (uint16_t)(256 * speedMult);
           }
         } else if (currentEffect == "chase") {
@@ -970,7 +992,6 @@ void loop() {
                 strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
               }
             }
-            strip.show();
             chaseStep++;
             if(chaseStep >= 3) chaseStep = 0;
           }
@@ -986,7 +1007,6 @@ void loop() {
                strip.setPixelColor(pixel, strip.Color(255, 255, 255));
             }
           }
-          strip.show();
         } else if (currentEffect == "fire") {
           for(int i = 0; i < numLeds; i++) {
             int flicker = random(0, 50 * speedMult);
@@ -998,10 +1018,8 @@ void loop() {
             if (b1 < 0) b1 = 0;
             strip.setPixelColor(i, strip.Color(r1, g1, b1));
           }
-          strip.show();
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
-          strip.show();
         } else if (currentEffect == "sunrise") {
           float progress = 0.0f;
           if (sunriseDurationMillis > 0) {
@@ -1017,7 +1035,6 @@ void loop() {
           
           strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
           strip.fill(color);
-          strip.show();
         } else if (currentEffect == "sunset") {
           float progress = 0.0f;
           if (sunsetDurationMillis > 0) {
@@ -1033,8 +1050,16 @@ void loop() {
           
           strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
           strip.fill(color);
-          strip.show();
         }
+
+        // --- MASQUE DE TRANSITION ---
+        if (litLeds < numLeds) {
+          for (int i = litLeds; i < numLeds; i++) {
+            strip.setPixelColor(i, 0); // Eteint les LEDs au-delà de litLeds
+          }
+        }
+        
+        strip.show();
       }
     }
   }
