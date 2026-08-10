@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.0.6"
+#define FIRMWARE_VERSION "v0.1.0"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -42,6 +42,7 @@ unsigned long lastWifiReconnectAttempt = 0;
 
 // Configuration du ruban LED
 #define PIN 16
+#define LEDS_PER_WRAP 4
 uint16_t numLeds = 30;
 Adafruit_NeoPixel strip(numLeds, PIN, NEO_GRB + NEO_KHZ800);
 
@@ -1040,6 +1041,75 @@ void loop() {
                 strip.setPixelColor(i, 0);
              }
           }
+        } else if (currentEffect == "lighthouse") {
+          strip.clear();
+          float p = (millis() * speedMult) / 2000.0;
+          int wrapOffset = (int)(p * LEDS_PER_WRAP) % LEDS_PER_WRAP;
+          for(int i = 0; i < numLeds; i++) {
+            if (i % LEDS_PER_WRAP == wrapOffset) {
+              if (!useDefaultEffectColors && numEffectColors > 0) {
+                strip.setPixelColor(i, getWrappedColorForProgress((float)i / numLeds, effectColors, numEffectColors));
+              } else {
+                strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
+              }
+            }
+          }
+        } else if (currentEffect == "barber_pole") {
+          strip.clear();
+          float p = (millis() * speedMult) / 2000.0;
+          int offset = (int)(p * numLeds); 
+          for(int i = 0; i < numLeds; i++) {
+            int spiralIndex = (i + offset) % (LEDS_PER_WRAP * 2);
+            if (spiralIndex < LEDS_PER_WRAP) {
+                strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
+            } else {
+                if (!useDefaultEffectColors && numEffectColors > 1) {
+                    strip.setPixelColor(i, effectColors[1]);
+                } else {
+                    strip.setPixelColor(i, strip.Color(255, 255, 255));
+                }
+            }
+          }
+        } else if (currentEffect == "matrix") {
+          strip.clear();
+          for(int i = 0; i < numLeds; i++) {
+             int col = i % LEDS_PER_WRAP;
+             int row = i / LEDS_PER_WRAP;
+             float speed = 1.0 + (col * 0.2);
+             int totalRows = numLeds / LEDS_PER_WRAP;
+             float dropPos = fmod((millis() * speedMult * speed / 500.0) + (col * 5.3), totalRows + 4.0);
+             float distance = dropPos - (totalRows - row); 
+             
+             if (distance >= 0 && distance < 4) {
+                 float intensity = 1.0f - (distance / 4.0f);
+                 intensity = intensity * intensity;
+                 if (!useDefaultEffectColors && numEffectColors > 0) {
+                     uint32_t c = effectColors[col % numEffectColors];
+                     uint8_t r = ((c >> 16) & 0xFF) * intensity;
+                     uint8_t g = ((c >> 8) & 0xFF) * intensity;
+                     uint8_t b = (c & 0xFF) * intensity;
+                     strip.setPixelColor(i, strip.Color(r, g, b));
+                 } else {
+                     strip.setPixelColor(i, strip.Color(currentR * intensity, currentG * intensity, currentB * intensity));
+                 }
+             }
+          }
+        } else if (currentEffect == "dna") {
+           strip.clear();
+           float p = (millis() * speedMult) / 2000.0;
+           int offset1 = (int)(p * LEDS_PER_WRAP) % LEDS_PER_WRAP;
+           int offset2 = (offset1 + (LEDS_PER_WRAP / 2)) % LEDS_PER_WRAP;
+           for (int i = 0; i < numLeds; i++) {
+              if (i % LEDS_PER_WRAP == offset1) {
+                  strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
+              } else if (i % LEDS_PER_WRAP == offset2) {
+                  if (!useDefaultEffectColors && numEffectColors > 1) {
+                      strip.setPixelColor(i, effectColors[1]);
+                  } else {
+                      strip.setPixelColor(i, strip.Color(255, 255, 255));
+                  }
+              }
+           }
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
         } else if (currentEffect == "sunrise") {
