@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.0"
+#define FIRMWARE_VERSION "v0.1.1"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -439,6 +439,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         isTimerActive = false;
       }
     }
+    
+    // Support d'une durée en secondes (ex: alerte météo)
+    if (doc["duration"].is<int>()) {
+      int d = doc["duration"];
+      if (d > 0) {
+        activeTimerDuration = d * 1000UL;
+        liveTimerStart = millis();
+        isTimerActive = true;
+        Serial.print("Timer activé pour ");
+        Serial.print(d);
+        Serial.println(" secondes.");
+      } else {
+        isTimerActive = false;
+      }
+    }
+    
     Serial.println("Action: LIVE appliquée");
     publishState();
   } else {
@@ -922,6 +938,14 @@ void loop() {
         
         if (currentEffect == "static") {
           strip.fill(strip.Color(currentR, currentG, currentB));
+        } else if (currentEffect == "breathe") {
+          // Effet de respiration mathématique réaliste (courbe exponentielle au lieu d'une simple sinusoïde)
+          float val = (exp(sin(millis() / (1000.0 / speedMult))) - 0.36787944) / 2.35040238;
+          // val varie entre 0.0 et 1.0 de manière très douce
+          uint8_t r = val * currentR;
+          uint8_t g = val * currentG;
+          uint8_t b = val * currentB;
+          strip.fill(strip.Color(r, g, b));
         } else if (currentEffect == "pulse") {
           float val = (sin(millis() / (500.0 / speedMult)) + 1.0) / 2.0; 
           uint8_t r = val * currentR;
