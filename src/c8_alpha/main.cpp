@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.1"
+#define FIRMWARE_VERSION "v0.1.2"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -82,6 +82,8 @@ int numEffectColors = 0;
 unsigned long liveTimerStart = 0;
 unsigned long activeTimerDuration = 0;
 bool isTimerActive = false;
+bool timerFinished = false;
+unsigned long timerFinishStart = 0;
 
 // Variables pour les transitions aube/crépuscule
 unsigned long sunriseStartTime = 0;
@@ -383,6 +385,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (action == "live") {
     isLiveMode = true;
+    timerFinished = false; // Reset the finish animation if a new live action arrives
     if (doc["state"].is<String>()) isLampOn = (doc["state"].as<String>() == "ON");
     if (doc["brightness"].is<int>()) globalBrightness = doc["brightness"];
     if (doc["effect"].is<String>()) {
@@ -459,6 +462,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     publishState();
   } else {
     isLiveMode = false;
+    timerFinished = false;
     
     preferences.begin("config", false);
     
@@ -897,9 +901,28 @@ void loop() {
       // Gestion du timer
       if (isLiveMode && isTimerActive && isLampOn) {
           if (millis() - liveTimerStart >= activeTimerDuration) {
+              if (currentEffect == "timer") {
+                  currentEffect = "strobe"; // Bascule en clignotement rapide
+                  effectSpeed = 150; // Très rapide
+                  isTimerActive = false;
+                  timerFinished = true;
+                  timerFinishStart = millis();
+                  Serial.println("Fin du minuteur progressif, clignotement de fin !");
+              } else {
+                  isLampOn = false;
+                  isTimerActive = false;
+                  Serial.println("Fin du timer, extinction de la lampe.");
+                  publishState();
+              }
+          }
+      }
+      
+      // Fin du clignotement rapide du minuteur
+      if (isLiveMode && timerFinished) {
+          if (millis() - timerFinishStart >= 10000) { // 10 secondes de clignotement
               isLampOn = false;
-              isTimerActive = false;
-              Serial.println("Fin du timer, extinction de la lampe.");
+              timerFinished = false;
+              Serial.println("Fin du clignotement de fin de minuteur, extinction.");
               publishState();
           }
       }
@@ -1133,6 +1156,51 @@ void loop() {
                       strip.setPixelColor(i, strip.Color(255, 255, 255));
                   }
               }
+           }
+        } else if (currentEffect == "strobe") {
+           // Clignotement stroboscopique
+           if (((millis() * (int)speedMult) / 100) % 2 == 0) {
+               strip.fill(strip.Color(currentR, currentG, currentB));
+           } else {
+               strip.clear();
+           }
+        } else if (currentEffect == "police") {
+           // Gyrophare Rouge/Bleu (ignore les couleurs actuelles pour imposer l'effet)
+           int cycle = ((millis() * (int)speedMult) / 200) % 2;
+           for(int i=0; i<numLeds; i++) {
+              if (i < numLeds/2) {
+                 strip.setPixelColor(i, cycle == 0 ? strip.Color(255, 0, 0) : strip.Color(0, 0, 0));
+              } else {
+                 strip.setPixelColor(i, cycle == 1 ? strip.Color(0, 0, 255) : strip.Color(0, 0, 0));
+              }
+           }
+        } else if (currentEffect == "scanner") {
+           // Effet K2000
+           strip.clear();
+           float p = (sin(millis() / (500.0 / speedMult)) + 1.0) / 2.0; 
+           int pos = p * (numLeds - 1);
+           strip.setPixelColor(pos, strip.Color(currentR, currentG, currentB));
+           if (pos > 0) strip.setPixelColor(pos - 1, strip.Color(currentR/4, currentG/4, currentB/4));
+           if (pos < numLeds - 1) strip.setPixelColor(pos + 1, strip.Color(currentR/4, currentG/4, currentB/4));
+        } else if (currentEffect == "twinkle") {
+           // Scintillement doux
+           strip.fill(strip.Color(currentR/8, currentG/8, currentB/8));
+           int density = 3 + (2 * speedMult);
+           for(int i=0; i<density; i++) {
+              int pixel = random(numLeds);
+              strip.setPixelColor(pixel, strip.Color(currentR, currentG, currentB));
+           }
+        } else if (currentEffect == "timer") {
+           // Minuteur progressif
+           float progress = 0.0f;
+           if (activeTimerDuration > 0) {
+              progress = (float)(millis() - liveTimerStart) / activeTimerDuration;
+           }
+           if (progress > 1.0f) progress = 1.0f;
+           int ledsToLight = progress * numLeds;
+           strip.clear();
+           for(int i = 0; i < ledsToLight; i++) {
+              strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
            }
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
