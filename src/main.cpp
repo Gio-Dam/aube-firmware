@@ -1,5 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <Update.h>
+#include <HTTPUpdate.h>
+
+#define HARDWARE_MODEL "c8-alpha"
+#define FIRMWARE_VERSION "v0.0.6"
+#define API_BASE_URL "https://iot.comm-unic8.fr"
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
@@ -13,12 +21,16 @@
 String chipId;
 String mqttTopicConfig;
 String mqttTopicState;
+String mqttTopicStatus;
 String mqttClientId;
 
 Preferences preferences;
 bool wifiProvisioned = false;
 String storedSSID = "";
 String storedPass = "";
+
+void checkForUpdates();
+
 
 WebServer server(80);
 bool inAPMode = false;
@@ -92,6 +104,15 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 unsigned long lastUpdate = 0;
 bool isTimeInitialized = false;
+
+// --- GESTION DES LOGS A DISTANCE ---
+void remoteLog(String msg) {
+  Serial.println(msg);
+  if (client.connected() && chipId.length() > 0) {
+    String logTopic = "communic8/lampe/" + chipId + "/log";
+    client.publish(logTopic.c_str(), msg.c_str());
+  }
+}
 
 // --- GESTION DES ETATS ---
 
@@ -255,6 +276,11 @@ void checkSchedules() {
   static int lastTriggeredMinute = -1;
   if (lastTriggeredMinute == currentTotalMinutes) return; // Déjà vérifié pour cette minute
 
+  if (ptm->tm_hour == 12 && ptm->tm_min == 0) {
+    Serial.println("⏰ 12h00 : Vérification automatique des mises à jour OTA...");
+    checkForUpdates();
+  }
+
   // Vérification de la date et du jour pour les exceptions
   char dateStr[11];
   snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", ptm->tm_year + 1900, ptm->tm_mon + 1, ptm->tm_mday);
@@ -346,6 +372,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.print("Nombre de LEDs mis à jour: ");
       Serial.println(numLeds);
     }
+  }
+
+  if (action == "update") {
+    Serial.println("Action: UPDATE - Vérification des mises à jour demandée via MQTT...");
+    checkForUpdates();
+    return;
   }
 
   if (action == "live") {
@@ -457,6 +489,109 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+void publishStatus() {
+  if (!client.connected()) return;
+  JsonDocument doc;
+  doc["version"] = FIRMWARE_VERSION;
+  doc["model"] = HARDWARE_MODEL;
+  String output;
+  serializeJson(doc, output);
+  client.publish(mqttTopicStatus.c_str(), output.c_str(), true);
+  Serial.print("Statut publié: ");
+  Serial.println(output);
+}
+
+void checkForUpdates() {
+  if (WiFi.status() == WL_CONNECTED) {
+    // Clignotement orange pour indiquer la vérification des mises à jour
+    for(int i = 0; i < 3; i++) {
+        strip.fill(strip.Color(255, 100, 0));
+        strip.show();
+        delay(300);
+        strip.clear();
+        strip.show();
+        delay(300);
+    }
+    
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Contourne la vérification SSL
+    
+    HTTPClient http;
+    String url = String(API_BASE_URL) + "/api/ota?deviceId=" + chipId + "&version=" + FIRMWARE_VERSION;
+    
+    remoteLog("Vérification des mises à jour OTA sur : " + url);
+    http.begin(secureClient, url);
+    int httpCode = http.GET();
+    
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      JsonDocument doc;
+      deserializeJson(doc, payload);
+      
+      if (doc["updateAvailable"] == true && doc["downloadUrl"].is<String>()) {
+        String downloadUrl = doc["downloadUrl"].as<String>();
+        Serial.println("Mise à jour disponible ! Téléchargement depuis : " + downloadUrl);
+        
+        // Clignote 5x en rouge pour annoncer la mise à jour
+        for(int i = 0; i < 5; i++) {
+            strip.fill(strip.Color(255, 0, 0));
+            strip.show();
+            delay(300);
+            strip.clear();
+            strip.show();
+            delay(300);
+        }
+        
+        // Configurer le callback de progression OTA
+        httpUpdate.onProgress([](int progress, int total) {
+          static int lastPercent = -1;
+          int percent = (progress * 100) / total;
+          
+          int ledsToLight = (percent * numLeds) / 100;
+          strip.clear();
+          for(int i = 0; i < ledsToLight; i++) {
+              strip.setPixelColor(i, strip.Color(255, 0, 0));
+          }
+          strip.show();
+
+          if (percent != lastPercent && percent % 5 == 0) { // Envoi MQTT tous les 5%
+            lastPercent = percent;
+            if (client.connected()) {
+              JsonDocument docP;
+              docP["state"] = "UPDATING";
+              docP["progress"] = percent;
+              String output;
+              serializeJson(docP, output);
+              client.publish(mqttTopicState.c_str(), output.c_str(), true); // retain=true
+            }
+          }
+        });
+
+        httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        t_httpUpdate_return ret = httpUpdate.update(secureClient, downloadUrl);
+        
+        switch (ret) {
+          case HTTP_UPDATE_FAILED:
+            remoteLog("Erreur HTTPUpdate : " + httpUpdate.getLastErrorString());
+            break;
+          case HTTP_UPDATE_NO_UPDATES:
+            remoteLog("Aucune mise à jour");
+            break;
+          case HTTP_UPDATE_OK:
+            remoteLog("Mise à jour réussie. Redémarrage...");
+            ESP.restart();
+            break;
+        }
+      } else {
+        remoteLog("Aucune mise à jour disponible.");
+      }
+    } else {
+      remoteLog("Erreur HTTP lors de la vérification OTA : " + String(httpCode));
+    }
+    http.end();
+  }
+}
+
 void maintainMQTTConnection() {
   if (!client.connected()) {
     unsigned long now = millis();
@@ -468,6 +603,7 @@ void maintainMQTTConnection() {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
         publishState();
+        publishStatus();
         lastMqttReconnectAttempt = 0;
       } else {
         Serial.print("échec, rc=");
@@ -567,8 +703,7 @@ void connectToWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connecté.");
-    Serial.println(WiFi.localIP());
+    remoteLog("WiFi connecté. IP : " + WiFi.localIP().toString());
     wifiProvisioned = true;
     wifiFailedAttempts = 0;
     strip.clear();
@@ -597,6 +732,7 @@ void setup() {
   mqttClientId = "COMMUNIC8-" + chipId;
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
   mqttTopicState = "communic8/lampe/" + chipId + "/state";
+  mqttTopicStatus = "communic8/lampe/" + chipId + "/status";
 
   // Initialisation des données persistantes depuis la mémoire Flash (NVS)
   preferences.begin("config", false);
@@ -664,6 +800,8 @@ void setup() {
     connectToWiFi();
     if (!wifiProvisioned) {
       startAPMode();
+    } else {
+      checkForUpdates();
     }
   } else {
     startAPMode();
@@ -749,10 +887,33 @@ void loop() {
           }
       }
       
-      if (!isLampOn) {
+      // Gestion de la transition d'allumage / extinction
+      static bool wasLampOn = isLampOn;
+      static unsigned long transitionStartTime = 0;
+      static bool inTransition = false;
+
+      if (isLampOn != wasLampOn) {
+        inTransition = true;
+        transitionStartTime = millis();
+        wasLampOn = isLampOn;
+      }
+
+      int litLeds = isLampOn ? numLeds : 0;
+      if (inTransition) {
+        unsigned long elapsed = millis() - transitionStartTime;
+        float progress = (float)elapsed / 1000.0f; // 1 seconde de transition totale
+        if (progress >= 1.0f) {
+          inTransition = false;
+        } else {
+          // On allume progressivement de 0 à numLeds, ou on éteint de numLeds à 0
+          litLeds = isLampOn ? (progress * numLeds) : ((1.0f - progress) * numLeds);
+        }
+      }
+
+      if (litLeds == 0 && !isLampOn && !inTransition) {
         strip.clear();
         strip.show();
-      } else if (isLiveMode) {
+      } else if (isLiveMode || inTransition) {
         strip.setBrightness(globalBrightness);
         
         static uint16_t rainbowHue = 0;
@@ -760,7 +921,6 @@ void loop() {
         
         if (currentEffect == "static") {
           strip.fill(strip.Color(currentR, currentG, currentB));
-          strip.show();
         } else if (currentEffect == "pulse") {
           float val = (sin(millis() / (500.0 / speedMult)) + 1.0) / 2.0; 
           uint8_t r = val * currentR;
@@ -776,7 +936,6 @@ void loop() {
           }
           
           strip.fill(strip.Color(r, g, b));
-          strip.show();
         } else if (currentEffect == "wave") {
           for(int i=0; i<numLeds; i++) {
             float wave = (sin((i * 0.3) + (millis() / (300.0 / speedMult))) + 1.0) / 2.0;
@@ -792,10 +951,8 @@ void loop() {
                strip.setPixelColor(i, strip.Color(currentR * wave, currentG * wave, currentB * wave));
             }
           }
-          strip.show();
         } else if (currentEffect == "color_cycle") {
           strip.fill(strip.gamma32(strip.ColorHSV(rainbowHue)));
-          strip.show();
           rainbowHue += (uint16_t)(256 * speedMult);
         } else if (currentEffect == "rainbow") {
           if (!useDefaultEffectColors && numEffectColors > 0) {
@@ -804,13 +961,11 @@ void loop() {
               float p = progressOffset + (i / (float)numLeds);
               strip.setPixelColor(i, getWrappedColorForProgress(p, effectColors, numEffectColors));
             }
-            strip.show();
           } else {
             for(int i=0; i<numLeds; i++) {
               int pixelHue = rainbowHue + (i * 65536L / numLeds);
               strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
             }
-            strip.show();
             rainbowHue += (uint16_t)(256 * speedMult);
           }
         } else if (currentEffect == "chase") {
@@ -827,7 +982,6 @@ void loop() {
                 strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
               }
             }
-            strip.show();
             chaseStep++;
             if(chaseStep >= 3) chaseStep = 0;
           }
@@ -843,7 +997,6 @@ void loop() {
                strip.setPixelColor(pixel, strip.Color(255, 255, 255));
             }
           }
-          strip.show();
         } else if (currentEffect == "fire") {
           for(int i = 0; i < numLeds; i++) {
             int flicker = random(0, 50 * speedMult);
@@ -855,10 +1008,40 @@ void loop() {
             if (b1 < 0) b1 = 0;
             strip.setPixelColor(i, strip.Color(r1, g1, b1));
           }
-          strip.show();
+        } else if (currentEffect == "meteor") {
+          static int meteorPos = 0;
+          static unsigned long lastMeteorUpdate = 0;
+          
+          if (millis() - lastMeteorUpdate > (50 / speedMult)) {
+             lastMeteorUpdate = millis();
+             meteorPos++;
+             if (meteorPos >= numLeds + 15) {
+                meteorPos = 0;
+             }
+          }
+          
+          for (int i = 0; i < numLeds; i++) {
+             int distance = meteorPos - i;
+             if (distance >= 0 && distance < 10) {
+                float intensity = 1.0f - (distance / 10.0f);
+                intensity = intensity * intensity * intensity;
+                
+                if (!useDefaultEffectColors && numEffectColors > 0) {
+                   float p = (millis() * speedMult) / 2000.0;
+                   uint32_t color = getWrappedColorForProgress(p, effectColors, numEffectColors);
+                   uint8_t r = ((color >> 16) & 0xFF) * intensity;
+                   uint8_t g = ((color >> 8) & 0xFF) * intensity;
+                   uint8_t b = (color & 0xFF) * intensity;
+                   strip.setPixelColor(i, strip.Color(r, g, b));
+                } else {
+                   strip.setPixelColor(i, strip.Color(currentR * intensity, currentG * intensity, currentB * intensity));
+                }
+             } else {
+                strip.setPixelColor(i, 0);
+             }
+          }
         } else if (currentEffect == "nightlight") {
           strip.fill(strip.Color(currentR / 4, currentG / 4, currentB / 4));
-          strip.show();
         } else if (currentEffect == "sunrise") {
           float progress = 0.0f;
           if (sunriseDurationMillis > 0) {
@@ -874,7 +1057,6 @@ void loop() {
           
           strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
           strip.fill(color);
-          strip.show();
         } else if (currentEffect == "sunset") {
           float progress = 0.0f;
           if (sunsetDurationMillis > 0) {
@@ -890,8 +1072,16 @@ void loop() {
           
           strip.setBrightness(255); // On force à 255 pour ne pas doubler la division d'entiers
           strip.fill(color);
-          strip.show();
         }
+
+        // --- MASQUE DE TRANSITION ---
+        if (litLeds < numLeds) {
+          for (int i = litLeds; i < numLeds; i++) {
+            strip.setPixelColor(i, 0); // Eteint les LEDs au-delà de litLeds
+          }
+        }
+        
+        strip.show();
       }
     }
   }
