@@ -4,7 +4,7 @@
 #include <Update.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.0.4"
+#define FIRMWARE_VERSION "v0.0.5"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -573,20 +573,22 @@ void checkForUpdates() {
         int dlCode = httpOta.GET();
         if (dlCode == HTTP_CODE_OK || dlCode == HTTP_CODE_MOVED_PERMANENTLY || dlCode == HTTP_CODE_FOUND) {
           int contentLength = httpOta.getSize();
-          bool canBegin = Update.begin(contentLength);
+          bool canBegin = Update.begin(contentLength > 0 ? contentLength : UPDATE_SIZE_UNKNOWN);
           if (canBegin) {
             WiFiClient * stream = httpOta.getStreamPtr();
             size_t written = Update.writeStream(*stream);
-            if (written == contentLength) {
-              remoteLog("Mise à jour réussie. Redémarrage...");
+            if (written > 0 && (contentLength == -1 || written == contentLength)) {
               if (Update.end()) {
+                remoteLog("Mise à jour réussie. Redémarrage...");
                 ESP.restart();
+              } else {
+                remoteLog("Erreur Update.end : " + String(Update.getError()));
               }
             } else {
               remoteLog("Erreur d'écriture OTA (taille incorrecte).");
             }
           } else {
-             remoteLog("Erreur Update.begin (espace insuffisant ?)");
+             remoteLog("Erreur Update.begin (espace insuffisant ou pas de partition OTA ?)");
           }
         } else {
           remoteLog("Erreur HTTP au téléchargement du firmware : " + String(dlCode));
