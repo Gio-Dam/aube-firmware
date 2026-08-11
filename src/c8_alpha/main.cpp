@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.2"
+#define FIRMWARE_VERSION "v0.1.4"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -22,6 +22,7 @@ String chipId;
 String mqttTopicConfig;
 String mqttTopicState;
 String mqttTopicStatus;
+String mqttTopicSpotify;
 String mqttClientId;
 
 Preferences preferences;
@@ -84,6 +85,54 @@ unsigned long activeTimerDuration = 0;
 bool isTimerActive = false;
 bool timerFinished = false;
 unsigned long timerFinishStart = 0;
+
+// -- Variables Spotify Sync --
+bool isSpotifySyncActive = false;
+int64_t spotifyBeats[50];
+int spotifyBeatsCount = 0;
+int currentSpotifyBeatIndex = 0;
+
+void handleSpotifySync() {
+  if (!isSpotifySyncActive) return;
+  
+  struct timeval tv_now;
+  gettimeofday(&tv_now, NULL);
+  int64_t currentMs = (int64_t)tv_now.tv_sec * 1000L + (int64_t)tv_now.tv_usec / 1000L;
+
+  if (currentSpotifyBeatIndex < spotifyBeatsCount) {
+    int64_t nextBeatMs = spotifyBeats[currentSpotifyBeatIndex];
+    int64_t diff = currentMs - nextBeatMs; 
+    
+    int brightness = 10; 
+
+    if (diff < -100) {
+      if (currentSpotifyBeatIndex > 0) {
+        int64_t prevBeatMs = spotifyBeats[currentSpotifyBeatIndex - 1];
+        int64_t prevDiff = currentMs - prevBeatMs;
+        if (prevDiff > 0 && prevDiff < 400) {
+          brightness = map(prevDiff, 0, 400, globalBrightness, 10);
+        }
+      }
+    } else if (diff >= -100 && diff <= 0) {
+      brightness = map(diff, -100, 0, 10, globalBrightness);
+    } else if (diff > 0 && diff < 400) {
+      brightness = map(diff, 0, 400, globalBrightness, 10);
+    } else if (diff >= 400) {
+      currentSpotifyBeatIndex++;
+      brightness = 10;
+    }
+
+    brightness = constrain(brightness, 10, globalBrightness);
+    strip.setBrightness(brightness);
+    for (int i = 0; i < numLeds; i++) {
+       strip.setPixelColor(i, strip.Color(currentR, currentG, currentB));
+    }
+    strip.show();
+  } else {
+      strip.setBrightness(10);
+      strip.show();
+  }
+}
 
 // Variables pour les transitions aube/crépuscule
 unsigned long sunriseStartTime = 0;
@@ -254,6 +303,7 @@ uint32_t getWrappedColorForProgress(float progress, uint32_t* colors, int count)
 // --- GESTION DU TEMPS ET ANIMATION ---
 
 void setupTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
   tzset();
   timeClient.begin();
@@ -350,6 +400,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrivé sur le topic: ");
   Serial.println(topic);
 
+  if (String(topic) == mqttTopicSpotify) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload, length);
+    if (!error) {
+      if (doc["beats"].is<JsonArray>()) {
+        isSpotifySyncActive = true;
+        isLiveMode = true;
+        isLampOn = true;
+        JsonArray beatsArr = doc["beats"].as<JsonArray>();
+        spotifyBeatsCount = 0;
+        currentSpotifyBeatIndex = 0;
+        for (JsonVariant v : beatsArr) {
+          if (spotifyBeatsCount < 50) {
+            spotifyBeats[spotifyBeatsCount++] = v.as<int64_t>();
+          }
+        }
+      } else if (doc["action"] == "stop") {
+        isSpotifySyncActive = false;
+        isLiveMode = false;
+        strip.clear();
+        strip.show();
+      }
+    }
+    return;
+  }
+
   JsonDocument doc; 
   DeserializationError error = deserializeJson(doc, payload, length);
 
@@ -380,6 +456,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (action == "update") {
     Serial.println("Action: UPDATE - Vérification des mises à jour demandée via MQTT...");
     checkForUpdates();
+    return;
+  }
+
+  if (action == "forget_wifi") {
+    Serial.println("Action: FORGET_WIFI - Suppression des identifiants Wi-Fi et redémarrage...");
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+    delay(500);
+    ESP.restart();
     return;
   }
 
@@ -623,6 +709,7 @@ void maintainMQTTConnection() {
       if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password)) {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
+        client.subscribe(mqttTopicSpotify.c_str());
         publishState();
         publishStatus();
         lastMqttReconnectAttempt = 0;
@@ -638,6 +725,20 @@ void maintainMQTTConnection() {
 // --- GESTION DU WI-FI ---
 
 void startAPMode() {
+  Serial.println("Scan des réseaux Wi-Fi en cours...");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  int n = WiFi.scanNetworks();
+  String options = "";
+  if (n == 0) {
+    options = "<option disabled>Aucun réseau trouvé</option>";
+  } else {
+    for (int i = 0; i < n; ++i) {
+      options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)</option>";
+    }
+  }
+
   Serial.println("Démarrage du point d'accès Wi-Fi (AP)...");
   
   WiFi.mode(WIFI_AP);
@@ -659,25 +760,39 @@ void startAPMode() {
   }
 
   // Configuration du WebServer
-  server.on("/", HTTP_GET, []() {
+  server.on("/", HTTP_GET, [options]() {
     String html = R"HTML(
       <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
       <style>
-        body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; text-align: center; margin: 0; padding: 20px; background: #0f172a; color: white; }
-        .container { max-width: 400px; margin: 0 auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        h2 { margin-bottom: 20px; color: #38bdf8; }
-        input { padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; }
-        input[type="submit"] { background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 16px; border: none; cursor: pointer; margin-top: 20px; transition: background 0.3s; }
-        input[type="submit"]:hover { background: #0ea5e9; }
+        :root { --background: #262523; --card: #302f2d; --primary: #4d51ff; --primary-hover: #3b3fff; --border: #3f3f46; --text: #ffffff; --muted: #a1a1aa; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--background); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+        .container { background-color: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 40px 30px; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
+        h2 { margin: 0 0 10px; font-size: 24px; font-weight: 600; letter-spacing: -0.5px; }
+        p { color: var(--muted); font-size: 14px; margin-bottom: 30px; line-height: 1.5; }
+        .input-group { margin-bottom: 16px; text-align: left; }
+        select, input[type="password"] { width: 100%; padding: 14px 16px; border-radius: 10px; border: 1px solid var(--border); background-color: var(--background); color: var(--text); font-size: 15px; box-sizing: border-box; outline: none; transition: border-color 0.2s; appearance: none; }
+        select:focus, input[type="password"]:focus { border-color: var(--primary); }
+        input[type="submit"] { width: 100%; padding: 14px; margin-top: 10px; border-radius: 10px; border: none; background-color: var(--primary); color: white; font-size: 16px; font-weight: 600; cursor: pointer; transition: background-color 0.2s, transform 0.1s; }
+        input[type="submit"]:hover { background-color: var(--primary-hover); }
+        input[type="submit"]:active { transform: scale(0.98); }
+        .logo { margin-bottom: 20px; font-size: 32px; font-weight: 800; color: var(--primary); letter-spacing: -1px; }
       </style>
       </head><body>
       <div class="container">
-        <h2>CommUnic8<br>Configuration</h2>
-        <p style="font-size: 14px; color: #94a3b8; margin-bottom: 20px;">Veuillez entrer les identifiants de votre réseau Wi-Fi.</p>
+        <div class="logo">AUBE</div>
+        <h2>Connexion Wi-Fi</h2>
+        <p>Veuillez connecter votre lampe à votre réseau domestique pour la contrôler.</p>
         <form action="/save" method="POST">
-          <input type="text" name="ssid" placeholder="Nom du réseau (SSID)" required>
-          <input type="password" name="pass" placeholder="Mot de passe" required>
-          <input type="submit" value="Se connecter">
+          <div class="input-group">
+            <select name="ssid" required>
+              <option value="" disabled selected>Sélectionnez votre réseau...</option>
+              )HTML" + options + R"HTML(
+            </select>
+          </div>
+          <div class="input-group">
+            <input type="password" name="pass" placeholder="Mot de passe" required>
+          </div>
+          <input type="submit" value="Connecter la lampe">
         </form>
       </div>
       </body></html>
@@ -696,8 +811,23 @@ void startAPMode() {
     
     String html = R"HTML(
       <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background: #0f172a; color: #38bdf8; }</style>
-      </head><body><h2>Sauvegarde réussie !</h2><p style="color:white;">La lampe va redémarrer et tenter de se connecter à : <b>)HTML" + ssid + R"HTML(</b></p></body></html>
+      <style>
+        :root { --background: #262523; --card: #302f2d; --primary: #4d51ff; --border: #3f3f46; --text: #ffffff; --muted: #a1a1aa; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--background); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+        .container { background-color: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 40px 30px; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
+        h2 { margin: 0 0 15px; font-size: 24px; font-weight: 600; color: var(--primary); }
+        p { color: var(--muted); font-size: 15px; line-height: 1.5; margin: 0; }
+        b { color: var(--text); }
+        .spinner { margin: 30px auto 0; width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-left-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+      </style>
+      </head><body>
+      <div class="container">
+        <h2>Configuration réussie</h2>
+        <p>La lampe va redémarrer et tenter de se connecter au réseau :<br><br><b>)HTML" + ssid + R"HTML(</b></p>
+        <div class="spinner"></div>
+      </div>
+      </body></html>
     )HTML";
     
     server.send(200, "text/html", html);
@@ -754,6 +884,7 @@ void setup() {
   mqttTopicConfig = "communic8/lampe/" + chipId + "/config";
   mqttTopicState = "communic8/lampe/" + chipId + "/state";
   mqttTopicStatus = "communic8/lampe/" + chipId + "/status";
+  mqttTopicSpotify = "communic8/lampe/" + chipId + "/spotify";
 
   // Initialisation des données persistantes depuis la mémoire Flash (NVS)
   preferences.begin("config", false);
@@ -898,6 +1029,11 @@ void loop() {
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
       checkSchedules();
       
+      if (isSpotifySyncActive) {
+        handleSpotifySync();
+        return;
+      }
+
       // Gestion du timer
       if (isLiveMode && isTimerActive && isLampOn) {
           if (millis() - liveTimerStart >= activeTimerDuration) {
