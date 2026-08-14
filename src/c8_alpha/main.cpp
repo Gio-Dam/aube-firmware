@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.4"
+#define FIRMWARE_VERSION "v0.1.5"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -85,6 +85,8 @@ unsigned long activeTimerDuration = 0;
 bool isTimerActive = false;
 bool timerFinished = false;
 unsigned long timerFinishStart = 0;
+String timerEndEffect = "";
+uint32_t timerEndColor = 0;
 
 // -- Variables Spotify Sync --
 bool isSpotifySyncActive = false;
@@ -542,6 +544,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       } else {
         isTimerActive = false;
       }
+    }
+    
+    // Support de l'effet de fin de timer
+    if (doc["timerEndEffect"].is<String>()) {
+      timerEndEffect = doc["timerEndEffect"].as<String>();
+    } else {
+      timerEndEffect = ""; // Reset
+    }
+    
+    if (doc["timerEndColor"].is<String>()) {
+      String hexColor = doc["timerEndColor"].as<String>();
+      if (hexColor.startsWith("#") && hexColor.length() == 7) {
+         timerEndColor = strtol(&hexColor[1], NULL, 16);
+      }
+    } else {
+      timerEndColor = 0;
     }
     
     Serial.println("Action: LIVE appliquée");
@@ -1037,7 +1055,16 @@ void loop() {
       // Gestion du timer
       if (isLiveMode && isTimerActive && isLampOn) {
           if (millis() - liveTimerStart >= activeTimerDuration) {
-              if (currentEffect == "timer") {
+              if (timerEndEffect != "") {
+                  // Nouveau comportement "Focus" : on bascule sur l'effet de fin
+                  currentEffect = timerEndEffect;
+                  currentR = timerEndColor >> 16;
+                  currentG = timerEndColor >> 8 & 0xFF;
+                  currentB = timerEndColor & 0xFF;
+                  isTimerActive = false; // Le timer est fini
+                  Serial.println("Fin du timer de concentration, bascule sur l'effet de fin !");
+                  publishState();
+              } else if (currentEffect == "timer") {
                   currentEffect = "strobe"; // Bascule en clignotement rapide
                   effectSpeed = 150; // Très rapide
                   isTimerActive = false;
