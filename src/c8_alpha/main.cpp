@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.5"
+#define FIRMWARE_VERSION "v0.1.6"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -72,6 +72,7 @@ int numSleepColors = 7;
 bool isLiveMode = false;
 bool isLampOn = true;
 uint8_t currentR = 255, currentG = 140, currentB = 0;
+uint8_t targetR = 255, targetG = 140, targetB = 0;
 uint8_t globalBrightness = 255;
 String currentEffect = "static";
 uint8_t effectSpeed = 50;
@@ -511,9 +512,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       String hexColor = doc["color"].as<String>();
       if (hexColor.startsWith("#") && hexColor.length() == 7) {
         long number = strtol(&hexColor[1], NULL, 16);
-        currentR = number >> 16;
-        currentG = number >> 8 & 0xFF;
-        currentB = number & 0xFF;
+        targetR = number >> 16;
+        targetG = number >> 8 & 0xFF;
+        targetB = number & 0xFF;
       }
     }
     
@@ -1047,6 +1048,26 @@ void loop() {
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
       checkSchedules();
       
+      // Interpolation douce des couleurs cibles
+      if (currentR != targetR) {
+          int diff = targetR - currentR;
+          int step = diff * 0.1; // 10% de la distance
+          if (step == 0) step = (diff > 0) ? 1 : -1;
+          currentR += step;
+      }
+      if (currentG != targetG) {
+          int diff = targetG - currentG;
+          int step = diff * 0.1;
+          if (step == 0) step = (diff > 0) ? 1 : -1;
+          currentG += step;
+      }
+      if (currentB != targetB) {
+          int diff = targetB - currentB;
+          int step = diff * 0.1;
+          if (step == 0) step = (diff > 0) ? 1 : -1;
+          currentB += step;
+      }
+
       if (isSpotifySyncActive) {
         handleSpotifySync();
         return;
@@ -1058,9 +1079,9 @@ void loop() {
               if (timerEndEffect != "") {
                   // Nouveau comportement "Focus" : on bascule sur l'effet de fin
                   currentEffect = timerEndEffect;
-                  currentR = timerEndColor >> 16;
-                  currentG = timerEndColor >> 8 & 0xFF;
-                  currentB = timerEndColor & 0xFF;
+                  targetR = timerEndColor >> 16;
+                  targetG = timerEndColor >> 8 & 0xFF;
+                  targetB = timerEndColor & 0xFF;
                   isTimerActive = false; // Le timer est fini
                   Serial.println("Fin du timer de concentration, bascule sur l'effet de fin !");
                   publishState();
