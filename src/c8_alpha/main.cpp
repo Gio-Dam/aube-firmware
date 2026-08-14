@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.0"
+#define FIRMWARE_VERSION "v0.2.1"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -170,6 +170,8 @@ void remoteLog(String msg) {
 }
 
 // --- GESTION DES ETATS ---
+bool pendingStatePublish = false;
+unsigned long lastPendingPublishTime = 0;
 
 void publishState() {
   if (!client.connected()) return;
@@ -564,7 +566,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     
     Serial.println("Action: LIVE appliquée");
-    publishState();
+    pendingStatePublish = true;
   } else {
     isLiveMode = false;
     timerFinished = false;
@@ -1035,14 +1037,23 @@ void loop() {
     strip.show();
   }
 
+  unsigned long now = millis();
   updateTime();
   maintainMQTTConnection();
   
+  
+
+  // Envoi retardé du statut MQTT pour éviter les deadlocks
+  if (pendingStatePublish && now - lastPendingPublishTime > 500) {
+      publishState();
+      pendingStatePublish = false;
+      lastPendingPublishTime = now;
+  }
+
   if (wifiProvisioned && client.connected()) {
     client.loop();
   }
   
-  unsigned long now = millis();
   if (now - lastUpdate > 20) { // 20ms = ~50 FPS pour une fluidité parfaite
     lastUpdate = now;
     if (wifiProvisioned && WiFi.status() == WL_CONNECTED) {
