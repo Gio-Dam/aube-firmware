@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.1.6"
+#define FIRMWARE_VERSION "v0.2.0"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -70,7 +70,7 @@ int numSleepColors = 7;
 
 // Variables du mode Live (Télécommande)
 bool isLiveMode = false;
-bool isLampOn = true;
+bool isLampOn = false;
 uint8_t currentR = 255, currentG = 140, currentB = 0;
 uint8_t targetR = 255, targetG = 140, targetB = 0;
 uint8_t globalBrightness = 255;
