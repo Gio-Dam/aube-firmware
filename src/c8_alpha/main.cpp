@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.1"
+#define FIRMWARE_VERSION "v0.2.2"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -88,6 +88,11 @@ bool timerFinished = false;
 unsigned long timerFinishStart = 0;
 String timerEndEffect = "";
 uint32_t timerEndColor = 0;
+
+// Vrai si l'utilisateur a pris le contrôle manuel via une commande live.
+// Quand vrai, le planning automatique ne déclenche pas et n'éteint pas la lampe.
+// Remis à false quand la lampe s'éteint (timer, planning, ou commande OFF).
+bool userHasManualControl = false;
 
 // -- Variables Spotify Sync --
 bool isSpotifySyncActive = false;
@@ -370,7 +375,9 @@ void checkSchedules() {
   int sleepStartMinutes = (todayConfig.sleepHour * 60 + todayConfig.sleepMinute) - todayConfig.fadeSleep;
   if (sleepStartMinutes < 0) sleepStartMinutes += 1440;
 
-  if (currentTotalMinutes == dawnStartMinutes) {
+  // Le planning ne s'exécute que si l'utilisateur n'a pas pris le contrôle manuel.
+  // L'aube ne se déclenche que si la lampe est éteinte (ne pas interrompre l'utilisateur).
+  if (currentTotalMinutes == dawnStartMinutes && !isLampOn && !userHasManualControl) {
     currentEffect = "sunrise";
     sunriseDurationMillis = (unsigned long)todayConfig.fadeWakeUp * 60000UL;
     sunriseStartTime = millis();
@@ -378,7 +385,7 @@ void checkSchedules() {
     isLampOn = true;
     publishState();
     Serial.println("⏰ Déclenchement de l'aube locale !");
-  } else if (currentTotalMinutes == sleepStartMinutes) {
+  } else if (currentTotalMinutes == sleepStartMinutes && isLampOn && !userHasManualControl) {
     currentEffect = "sunset";
     sunsetDurationMillis = (unsigned long)todayConfig.fadeSleep * 60000UL;
     sunsetStartTime = millis();
@@ -387,9 +394,9 @@ void checkSchedules() {
     publishState();
     Serial.println("⏰ Déclenchement du crépuscule local !");
   } else {
-    // Extinction totale à l'heure exacte du coucher
+    // Extinction totale à l'heure exacte du coucher, uniquement si le planning l'a déclenchée.
     int sleepTotalMinutes = todayConfig.sleepHour * 60 + todayConfig.sleepMinute;
-    if (currentTotalMinutes == sleepTotalMinutes && isLampOn) {
+    if (currentTotalMinutes == sleepTotalMinutes && isLampOn && !userHasManualControl) {
         isLampOn = false;
         publishState();
         Serial.println("⏰ Extinction automatique (fin du crépuscule) !");
@@ -477,7 +484,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (action == "live") {
     isLiveMode = true;
     timerFinished = false; // Reset the finish animation if a new live action arrives
-    if (doc["state"].is<String>()) isLampOn = (doc["state"].as<String>() == "ON");
+    userHasManualControl = true; // L'utilisateur prend le contrôle, le planning s'arrête.
+    if (doc["state"].is<String>()) {
+      isLampOn = (doc["state"].as<String>() == "ON");
+      if (!isLampOn) {
+        // Extinction manuelle : on annule le timer et on libère le contrôle manuel
+        // pour que le planning puisse reprendre la prochaine fois.
+        isTimerActive = false;
+        userHasManualControl = false;
+      }
+    }
     if (doc["brightness"].is<int>()) globalBrightness = doc["brightness"];
     if (doc["effect"].is<String>()) {
       currentEffect = doc["effect"].as<String>();
@@ -1106,6 +1122,7 @@ void loop() {
               } else {
                   isLampOn = false;
                   isTimerActive = false;
+                  userHasManualControl = false;
                   Serial.println("Fin du timer, extinction de la lampe.");
                   publishState();
               }
@@ -1117,6 +1134,7 @@ void loop() {
           if (millis() - timerFinishStart >= 10000) { // 10 secondes de clignotement
               isLampOn = false;
               timerFinished = false;
+              userHasManualControl = false;
               Serial.println("Fin du clignotement de fin de minuteur, extinction.");
               publishState();
           }
