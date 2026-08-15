@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.2"
+#define FIRMWARE_VERSION "v0.2.3"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -430,9 +430,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         }
       } else if (doc["action"] == "stop") {
         isSpotifySyncActive = false;
-        isLiveMode = false;
-        strip.clear();
-        strip.show();
+        // Restore full brightness — Spotify modulates it per beat
+        if (isLampOn && isLiveMode) {
+          strip.setBrightness(globalBrightness);
+          strip.show();
+        }
       }
     }
     return;
