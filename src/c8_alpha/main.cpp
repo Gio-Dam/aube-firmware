@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.3"
+#define FIRMWARE_VERSION "v0.2.4"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -473,6 +473,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (action == "restart") {
+    Serial.println("Action: RESTART - Redémarrage forcé via MQTT...");
+    delay(500);
+    ESP.restart();
+    return;
+  }
+
   if (action == "forget_wifi") {
     Serial.println("Action: FORGET_WIFI - Suppression des identifiants Wi-Fi et redémarrage...");
     preferences.begin("wifi", false);
@@ -640,6 +647,8 @@ void publishStatus() {
   JsonDocument doc;
   doc["version"] = FIRMWARE_VERSION;
   doc["model"] = HARDWARE_MODEL;
+  doc["status"] = "online";
+  doc["rssi"] = WiFi.RSSI();
   String output;
   serializeJson(doc, output);
   client.publish(mqttTopicStatus.c_str(), output.c_str(), true);
@@ -745,7 +754,8 @@ void maintainMQTTConnection() {
       lastMqttReconnectAttempt = now;
       Serial.print("Tentative de connexion MQTT...");
       
-      if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password)) {
+      String lwtPayload = "{\"status\":\"offline\"}";
+      if (client.connect(mqttClientId.c_str(), mqtt_user, mqtt_password, mqttTopicStatus.c_str(), 1, true, lwtPayload.c_str())) {
         Serial.println("connecté");
         client.subscribe(mqttTopicConfig.c_str());
         client.subscribe(mqttTopicSpotify.c_str());
