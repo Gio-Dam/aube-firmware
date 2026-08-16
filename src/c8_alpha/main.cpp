@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.4"
+#define FIRMWARE_VERSION "v0.2.5"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -1063,6 +1063,7 @@ void loop() {
     wifiFailedAttempts = 0;
     strip.clear();
     strip.show();
+    checkForUpdates(); // Vérifier les mises à jour en attente après reconnexion
   }
 
   unsigned long now = millis();
