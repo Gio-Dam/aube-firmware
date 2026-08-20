@@ -5,7 +5,7 @@
 #include <HTTPUpdate.h>
 
 #define HARDWARE_MODEL "c8-alpha"
-#define FIRMWARE_VERSION "v0.2.5"
+#define FIRMWARE_VERSION "v0.2.6"
 #define API_BASE_URL "https://iot.comm-unic8.fr"
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -811,40 +811,49 @@ void startAPMode() {
   // Configuration du WebServer
   server.on("/", HTTP_GET, [options]() {
     String html = R"HTML(
-      <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
-        :root { --background: #262523; --card: #302f2d; --primary: #4d51ff; --primary-hover: #3b3fff; --border: #3f3f46; --text: #ffffff; --muted: #a1a1aa; }
-        body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--background); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-        .container { background-color: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 40px 30px; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
-        h2 { margin: 0 0 10px; font-size: 24px; font-weight: 600; letter-spacing: -0.5px; }
-        p { color: var(--muted); font-size: 14px; margin-bottom: 30px; line-height: 1.5; }
-        .input-group { margin-bottom: 16px; text-align: left; }
-        select, input[type="password"] { width: 100%; padding: 14px 16px; border-radius: 10px; border: 1px solid var(--border); background-color: var(--background); color: var(--text); font-size: 15px; box-sizing: border-box; outline: none; transition: border-color 0.2s; appearance: none; }
-        select:focus, input[type="password"]:focus { border-color: var(--primary); }
-        input[type="submit"] { width: 100%; padding: 14px; margin-top: 10px; border-radius: 10px; border: none; background-color: var(--primary); color: white; font-size: 16px; font-weight: 600; cursor: pointer; transition: background-color 0.2s, transform 0.1s; }
-        input[type="submit"]:hover { background-color: var(--primary-hover); }
-        input[type="submit"]:active { transform: scale(0.98); }
-        .logo { margin-bottom: 20px; font-size: 32px; font-weight: 800; color: var(--primary); letter-spacing: -1px; }
-      </style>
-      </head><body>
-      <div class="container">
-        <div class="logo">AUBE</div>
-        <h2>Connexion Wi-Fi</h2>
-        <p>Veuillez connecter votre lampe à votre réseau domestique pour la contrôler.</p>
-        <form action="/save" method="POST">
-          <div class="input-group">
-            <select name="ssid" required>
-              <option value="" disabled selected>Sélectionnez votre réseau...</option>
-              )HTML" + options + R"HTML(
-            </select>
-          </div>
-          <div class="input-group">
-            <input type="password" name="pass" placeholder="Mot de passe" required>
-          </div>
-          <input type="submit" value="Connecter la lampe">
-        </form>
-      </div>
-      </body></html>
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>AUBE - Configuration</title>
+        <style>
+          :root { --bg: #f4f4f5; --card: #ffffff; --text: #09090b; --muted: #71717a; --border: #e4e4e7; --primary: #09090b; --primary-hover: #27272a; --radius: 12px; }
+          @media (prefers-color-scheme: dark) {
+            :root { --bg: #09090b; --card: #18181b; --text: #fafafa; --muted: #a1a1aa; --border: #27272a; --primary: #fafafa; --primary-hover: #e4e4e7; }
+          }
+          body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+          .container { background-color: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 40px 32px; width: 100%; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; }
+          .logo-svg { width: 80px; height: auto; margin-bottom: 24px; color: var(--text); }
+          h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; color: var(--text); }
+          p { color: var(--muted); font-size: 14px; margin-bottom: 32px; line-height: 1.5; }
+          .input-group { margin-bottom: 16px; text-align: left; }
+          select, input[type="password"] { width: 100%; padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border); background-color: var(--bg); color: var(--text); font-size: 15px; box-sizing: border-box; outline: none; transition: border-color 0.2s; }
+          select:focus, input[type="password"]:focus { border-color: var(--text); }
+          input[type="submit"] { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: none; background-color: var(--primary); color: var(--bg); font-size: 15px; font-weight: 500; cursor: pointer; transition: opacity 0.2s; }
+          input[type="submit"]:hover { opacity: 0.9; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <svg class="logo-svg" viewBox="0 0 430.58 430.54" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" fill-rule="evenodd" d="m430.58,283.73v146.81H0V0h430.57v172.68c-24.85-4.42-53.11-6.91-82.97-6.91-100.06,0-181.44,27.97-181.44,62.43s81.37,62.43,181.44,62.43c29.86,0,58.12-2.48,82.97-6.91h.01Zm-233.18,6.91c-100.07,0-181.44,27.99-181.44,62.43s81.37,62.45,181.44,62.45,181.44-27.99,181.44-62.45-81.37-62.43-181.44-62.43Z"/></svg>
+          <h2>Connexion Wi-Fi</h2>
+          <p>Connectez votre lampe à votre réseau domestique pour la contrôler.</p>
+          <form action="/save" method="POST">
+            <div class="input-group">
+              <select name="ssid" required>
+                <option value="" disabled selected>Sélectionnez votre réseau...</option>
+                )HTML" + options + R"HTML(
+              </select>
+            </div>
+            <div class="input-group">
+              <input type="password" name="pass" placeholder="Mot de passe" required>
+            </div>
+            <input type="submit" value="Connecter la lampe">
+          </form>
+        </div>
+      </body>
+      </html>
     )HTML";
     server.send(200, "text/html", html);
   });
@@ -859,24 +868,36 @@ void startAPMode() {
     preferences.end();
     
     String html = R"HTML(
-      <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
-        :root { --background: #262523; --card: #302f2d; --primary: #4d51ff; --border: #3f3f46; --text: #ffffff; --muted: #a1a1aa; }
-        body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--background); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-        .container { background-color: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 40px 30px; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; }
-        h2 { margin: 0 0 15px; font-size: 24px; font-weight: 600; color: var(--primary); }
-        p { color: var(--muted); font-size: 15px; line-height: 1.5; margin: 0; }
-        b { color: var(--text); }
-        .spinner { margin: 30px auto 0; width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-left-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-      </style>
-      </head><body>
-      <div class="container">
-        <h2>Configuration réussie</h2>
-        <p>La lampe va redémarrer et tenter de se connecter au réseau :<br><br><b>)HTML" + ssid + R"HTML(</b></p>
-        <div class="spinner"></div>
-      </div>
-      </body></html>
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>AUBE - Succès</title>
+        <style>
+          :root { --bg: #f4f4f5; --card: #ffffff; --text: #09090b; --muted: #71717a; --border: #e4e4e7; --primary: #09090b; --radius: 12px; }
+          @media (prefers-color-scheme: dark) {
+            :root { --bg: #09090b; --card: #18181b; --text: #fafafa; --muted: #a1a1aa; --border: #27272a; --primary: #fafafa; }
+          }
+          body { font-family: 'Inter', -apple-system, sans-serif; background-color: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+          .container { background-color: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 40px 32px; width: 100%; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; }
+          .logo-svg { width: 80px; height: auto; margin-bottom: 24px; color: var(--text); }
+          h2 { margin: 0 0 12px; font-size: 20px; font-weight: 600; color: var(--text); }
+          p { color: var(--muted); font-size: 15px; line-height: 1.5; margin: 0; }
+          b { color: var(--text); font-weight: 600; }
+          .spinner { margin: 32px auto 0; width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--text); border-radius: 50%; animation: spin 1s linear infinite; }
+          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <svg class="logo-svg" viewBox="0 0 430.58 430.54" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" fill-rule="evenodd" d="m430.58,283.73v146.81H0V0h430.57v172.68c-24.85-4.42-53.11-6.91-82.97-6.91-100.06,0-181.44,27.97-181.44,62.43s81.37,62.43,181.44,62.43c29.86,0,58.12-2.48,82.97-6.91h.01Zm-233.18,6.91c-100.07,0-181.44,27.99-181.44,62.43s81.37,62.45,181.44,62.45,181.44-27.99,181.44-62.45-81.37-62.43-181.44-62.43Z"/></svg>
+          <h2>Configuration réussie</h2>
+          <p>La lampe va redémarrer et tenter de se connecter au réseau :<br><br><b>)HTML" + ssid + R"HTML(</b></p>
+          <div class="spinner"></div>
+        </div>
+      </body>
+      </html>
     )HTML";
     
     server.send(200, "text/html", html);
